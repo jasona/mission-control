@@ -7,6 +7,7 @@ import { buildDashboardSnapshot, getThreadDetail } from './lib/aggregator.mjs';
 import { approveDemo, createDemoThread, markDemoSeen, replyDemo } from './lib/demo.mjs';
 import { canonicalFile, isValidProjectId, isValidThreadId } from './lib/discovery.mjs';
 import { markThreadSeen } from './lib/seen.mjs';
+import { getDemoUsageSnapshot, getUsageSnapshot } from './lib/usage.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_PUBLIC_DIR = join(__dirname, 'public');
@@ -21,6 +22,7 @@ export const STATIC_ROUTES = {
   '/views/timeline.js': ['views/timeline.js', 'application/javascript; charset=utf-8'],
   '/views/graph.js': ['views/graph.js', 'application/javascript; charset=utf-8'],
   '/views/inspector.js': ['views/inspector.js', 'application/javascript; charset=utf-8'],
+  '/views/usage.js': ['views/usage.js', 'application/javascript; charset=utf-8'],
   '/components/modal.js': ['components/modal.js', 'application/javascript; charset=utf-8'],
   '/components/icons.js': ['components/icons.js', 'application/javascript; charset=utf-8'],
 };
@@ -148,6 +150,21 @@ export function createHandlers(options = {}) {
   async function handleDashboard(data = {}) {
     const opts = discoveryOpts(data);
     const snap = await buildDashboardSnapshot(opts);
+    return jsonReply(200, snap);
+  }
+
+  async function handleUsage(data = {}) {
+    const demo = isDemoRequest(data, defaultDemo);
+    if (demo) {
+      return jsonReply(200, getDemoUsageSnapshot());
+    }
+    const force = data?.refresh === '1' || data?.refresh === 'true' || data?.refresh === true;
+    const snap = await getUsageSnapshot({
+      force,
+      lsAddress: options.lsAddress,
+      csrfToken: options.csrfToken,
+      fetcher: options.usageFetcher,
+    });
     return jsonReply(200, snap);
   }
 
@@ -322,6 +339,7 @@ export function createHandlers(options = {}) {
     getPreloadJs,
     handleDashboard,
     handleThread,
+    handleUsage,
     handleReply,
     handleApprove,
     handleNewThread,
@@ -422,6 +440,11 @@ export async function startStandaloneServer(options = {}) {
         return writeHttpResult(res, await handlers.handleThread(queryData));
       }
 
+      if (pathname === '/api/usage') {
+        if (method !== 'GET') return writeHttpResult(res, jsonReply(405, { ok: false, error: 'Method not allowed' }));
+        return writeHttpResult(res, await handlers.handleUsage(queryData));
+      }
+
       if (pathname === '/api/reply' || pathname === '/api/approve' || pathname === '/api/threads/new' || pathname === '/api/seen') {
         if (method !== 'POST') return writeHttpResult(res, jsonReply(405, { ok: false, error: 'Method not allowed' }));
         let bodyData;
@@ -520,6 +543,7 @@ async function main() {
           return toSdkResponse(sdk, await handlers.handleDashboard({ ...data, conversationId: conv }));
         }, 'GET');
         app.api('/api/thread', async (data) => toSdkResponse(sdk, await handlers.handleThread(data)), 'GET');
+        app.api('/api/usage', async (data) => toSdkResponse(sdk, await handlers.handleUsage(data)), 'GET');
         app.api('/api/reply', async (data) => toSdkResponse(sdk, await handlers.handleReply(data)), 'POST');
         app.api('/api/approve', async (data) => toSdkResponse(sdk, await handlers.handleApprove(data)), 'POST');
         app.api('/api/threads/new', async (data) => toSdkResponse(sdk, await handlers.handleNewThread(data)), 'POST');

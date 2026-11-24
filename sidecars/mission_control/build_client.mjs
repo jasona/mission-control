@@ -14,6 +14,7 @@ const MODULES = [
   { id: 'views/timeline.js', rel: 'views/timeline.js' },
   { id: 'views/graph.js', rel: 'views/graph.js' },
   { id: 'views/inspector.js', rel: 'views/inspector.js' },
+  { id: 'views/usage.js', rel: 'views/usage.js' },
   { id: 'app-main.js', rel: 'app-main.js' },
 ];
 
