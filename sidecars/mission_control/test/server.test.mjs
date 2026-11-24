@@ -142,7 +142,7 @@ test('standalone demo server serves static assets, preload stub, dashboard etag,
   const htmlText = await htmlRes.text();
   assert.match(htmlText, /Mission Control/);
   assert.match(htmlText, /\/preload\.js/);
-  assert.match(htmlText, /<script src="\/app\.js"><\/script>/);
+  assert.match(htmlText, /<script src="\/app\.js(?:\?v=[a-f0-9]+)?"><\/script>/);
   assert.equal(/type=["']module["']/.test(htmlText), false);
 
   const cssRes = await fetch(`${srv.url}/styles.css`);

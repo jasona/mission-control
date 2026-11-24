@@ -14,9 +14,12 @@ export function renderNewThreadModal(snap, options = {}) {
     : '<option value="default">Current Workspace</option>';
 
   return `
-    <div class="mc-modal" role="document">
-      <header class="mc-modal-head">
-        <h2 class="mc-modal-title">New Thread</h2>
+    <div id="mc-new-thread-modal" class="mc-modal mc-modal-floating" role="document">
+      <header class="mc-modal-head" data-modal-drag-handle title="Drag to move · Double-click to reset">
+        <div class="mc-modal-head-title">
+          <span class="mc-modal-drag-grip" aria-hidden="true">⋮⋮</span>
+          <h2 class="mc-modal-title">New Thread</h2>
+        </div>
         <button type="button" class="mc-icon-btn" data-close-modal aria-label="Close modal">${icon('close')}</button>
       </header>
       <form id="mc-new-thread-form">
@@ -29,7 +32,7 @@ export function renderNewThreadModal(snap, options = {}) {
             <label class="mc-label" for="mc-nt-title">Title (optional)</label>
             <input id="mc-nt-title" name="title" type="text" class="mc-input" placeholder="e.g. Add webhook retry queue">
           </div>
-          <div class="mc-field">
+          <div class="mc-field mc-field-grow">
             <label class="mc-label" for="mc-nt-prompt">Prompt</label>
             <textarea id="mc-nt-prompt" name="prompt" class="mc-textarea" required placeholder="Describe what the agent or Swarm should build, fix, or investigate..."></textarea>
           </div>
@@ -45,6 +48,14 @@ export function renderNewThreadModal(snap, options = {}) {
           <button type="submit" class="mc-btn-primary" id="mc-nt-submit">Start Thread</button>
         </footer>
       </form>
+      <div class="mc-resize-handle mc-resize-n" data-modal-resize="n" aria-hidden="true"></div>
+      <div class="mc-resize-handle mc-resize-s" data-modal-resize="s" aria-hidden="true"></div>
+      <div class="mc-resize-handle mc-resize-e" data-modal-resize="e" aria-hidden="true"></div>
+      <div class="mc-resize-handle mc-resize-w" data-modal-resize="w" aria-hidden="true"></div>
+      <div class="mc-resize-handle mc-resize-ne" data-modal-resize="ne" aria-hidden="true"></div>
+      <div class="mc-resize-handle mc-resize-nw" data-modal-resize="nw" aria-hidden="true"></div>
+      <div class="mc-resize-handle mc-resize-se" data-modal-resize="se" aria-hidden="true" title="Drag to resize"></div>
+      <div class="mc-resize-handle mc-resize-sw" data-modal-resize="sw" aria-hidden="true"></div>
     </div>
   `;
 }

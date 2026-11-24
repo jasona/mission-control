@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -106,7 +107,22 @@ export function buildClientBundle() {
 
   const outPath = join(PUBLIC_DIR, 'app.js');
   writeFileSync(outPath, bundle, 'utf-8');
-  return { outPath, bytes: Buffer.byteLength(bundle, 'utf-8'), modules: MODULES.length };
+
+  // Stamp cache-busting content hashes onto /styles.css and /app.js in index.html
+  // so Antigravity's aux-pane webview always picks up rebuilt assets on reload.
+  const appHash = createHash('sha256').update(bundle).digest('hex').slice(0, 10);
+  const cssPath = join(PUBLIC_DIR, 'styles.css');
+  const cssHash = createHash('sha256').update(readFileSync(cssPath)).digest('hex').slice(0, 10);
+  const indexPath = join(PUBLIC_DIR, 'index.html');
+  const indexHtml = readFileSync(indexPath, 'utf-8');
+  const stampedHtml = indexHtml
+    .replace(/href="\/styles\.css(?:\?v=[^"]*)?"/, `href="/styles.css?v=${cssHash}"`)
+    .replace(/src="\/app\.js(?:\?v=[^"]*)?"/, `src="/app.js?v=${appHash}"`);
+  if (stampedHtml !== indexHtml) {
+    writeFileSync(indexPath, stampedHtml, 'utf-8');
+  }
+
+  return { outPath, bytes: Buffer.byteLength(bundle, 'utf-8'), modules: MODULES.length, appHash, cssHash };
 }
 
 const isEntrypoint = Boolean(process.argv[1]) && import.meta.url === `file://${resolve(process.argv[1])}`;

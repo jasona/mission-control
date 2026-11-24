@@ -54,7 +54,10 @@ const state = {
   pluginsOpen: false,
   settingsOpen: false,
   modal: null, // null | { type: 'new-thread', projectId } | { type: 'palette', query, index }
+  newThreadModalRect: null, // remembered { left, top, width, height } for draggable/resizable modal
 };
+
+let modalBackdropPointerDown = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -450,12 +453,161 @@ function closeSettingsPopover() {
   renderRail();
 }
 
+const FLOATING_MODAL_MIN_W = 360;
+const FLOATING_MODAL_MIN_H = 360;
+const FLOATING_MODAL_PAD = 12;
+
+function getDefaultNewThreadRect(modalEl) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const width = Math.min(540, Math.max(FLOATING_MODAL_MIN_W, vw - 32));
+  const naturalH = modalEl ? Math.ceil(modalEl.getBoundingClientRect().height) : 480;
+  const height = Math.min(Math.max(naturalH, 440), Math.max(FLOATING_MODAL_MIN_H, vh - 96));
+  const left = Math.max(FLOATING_MODAL_PAD, Math.round((vw - width) / 2));
+  const top = Math.max(FLOATING_MODAL_PAD, Math.min(68, Math.round((vh - height) / 2)));
+  return { left, top, width, height };
+}
+
+function clampFloatingModalRect(rect) {
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+  const maxW = Math.max(FLOATING_MODAL_MIN_W, vw - FLOATING_MODAL_PAD * 2);
+  const maxH = Math.max(FLOATING_MODAL_MIN_H, vh - FLOATING_MODAL_PAD * 2);
+  const width = Math.round(Math.min(maxW, Math.max(FLOATING_MODAL_MIN_W, rect.width)));
+  const height = Math.round(Math.min(maxH, Math.max(FLOATING_MODAL_MIN_H, rect.height)));
+  const minVisibleX = Math.min(80, width);
+  const left = Math.round(Math.min(vw - minVisibleX, Math.max(minVisibleX - width, rect.left)));
+  const top = Math.round(Math.min(vh - 48, Math.max(FLOATING_MODAL_PAD, rect.top)));
+  return { left, top, width, height };
+}
+
+function applyFloatingModalRect(modalEl, rect) {
+  if (!modalEl || !rect) return;
+  const clamped = clampFloatingModalRect(rect);
+  modalEl.style.left = `${clamped.left}px`;
+  modalEl.style.top = `${clamped.top}px`;
+  modalEl.style.width = `${clamped.width}px`;
+  modalEl.style.height = `${clamped.height}px`;
+  state.newThreadModalRect = clamped;
+}
+
+function initFloatingModal(modalEl) {
+  if (!modalEl) return;
+  const initial = state.newThreadModalRect
+    ? clampFloatingModalRect(state.newThreadModalRect)
+    : getDefaultNewThreadRect(modalEl);
+  applyFloatingModalRect(modalEl, initial);
+
+  const dragHandle = modalEl.querySelector('[data-modal-drag-handle]');
+  if (dragHandle) {
+    dragHandle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0 || e.target.closest('button, input, select, textarea, a')) return;
+      e.preventDefault();
+      modalBackdropPointerDown = false;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startRect = state.newThreadModalRect || getDefaultNewThreadRect(modalEl);
+      modalEl.classList.add('is-dragging');
+      dragHandle.setPointerCapture?.(e.pointerId);
+
+      const onMove = (ev) => {
+        applyFloatingModalRect(modalEl, {
+          left: startRect.left + (ev.clientX - startX),
+          top: startRect.top + (ev.clientY - startY),
+          width: startRect.width,
+          height: startRect.height,
+        });
+      };
+
+      const onUp = (ev) => {
+        modalEl.classList.remove('is-dragging');
+        if (dragHandle.hasPointerCapture?.(ev.pointerId)) {
+          dragHandle.releasePointerCapture(ev.pointerId);
+        }
+        dragHandle.removeEventListener('pointermove', onMove);
+        dragHandle.removeEventListener('pointerup', onUp);
+        dragHandle.removeEventListener('pointercancel', onUp);
+      };
+
+      dragHandle.addEventListener('pointermove', onMove);
+      dragHandle.addEventListener('pointerup', onUp);
+      dragHandle.addEventListener('pointercancel', onUp);
+    });
+
+    dragHandle.addEventListener('dblclick', (e) => {
+      if (e.target.closest('button, input, select, textarea, a')) return;
+      state.newThreadModalRect = null;
+      modalEl.style.height = '';
+      applyFloatingModalRect(modalEl, getDefaultNewThreadRect(modalEl));
+    });
+  }
+
+  for (const handle of modalEl.querySelectorAll('[data-modal-resize]')) {
+    const dir = handle.dataset.modalResize || '';
+    handle.addEventListener('pointerdown', (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      modalBackdropPointerDown = false;
+      const startX = e.clientX;
+      const startY = e.clientY;
+      const startRect = state.newThreadModalRect || getDefaultNewThreadRect(modalEl);
+      const vw = window.innerWidth;
+      const vh = window.innerHeight;
+      modalEl.classList.add('is-resizing');
+      handle.setPointerCapture?.(e.pointerId);
+
+      const onMove = (ev) => {
+        const dx = ev.clientX - startX;
+        const dy = ev.clientY - startY;
+        let { left, top, width, height } = startRect;
+
+        if (dir.includes('e')) {
+          width = Math.min(vw - FLOATING_MODAL_PAD - left, Math.max(FLOATING_MODAL_MIN_W, startRect.width + dx));
+        }
+        if (dir.includes('s')) {
+          height = Math.min(vh - FLOATING_MODAL_PAD - top, Math.max(FLOATING_MODAL_MIN_H, startRect.height + dy));
+        }
+        if (dir.includes('w')) {
+          const right = startRect.left + startRect.width;
+          const nextLeft = Math.max(FLOATING_MODAL_PAD, Math.min(right - FLOATING_MODAL_MIN_W, startRect.left + dx));
+          left = nextLeft;
+          width = right - nextLeft;
+        }
+        if (dir.includes('n')) {
+          const bottom = startRect.top + startRect.height;
+          const nextTop = Math.max(FLOATING_MODAL_PAD, Math.min(bottom - FLOATING_MODAL_MIN_H, startRect.top + dy));
+          top = nextTop;
+          height = bottom - nextTop;
+        }
+
+        applyFloatingModalRect(modalEl, { left, top, width, height });
+      };
+
+      const onUp = (ev) => {
+        modalEl.classList.remove('is-resizing');
+        if (handle.hasPointerCapture?.(ev.pointerId)) {
+          handle.releasePointerCapture(ev.pointerId);
+        }
+        handle.removeEventListener('pointermove', onMove);
+        handle.removeEventListener('pointerup', onUp);
+        handle.removeEventListener('pointercancel', onUp);
+      };
+
+      handle.addEventListener('pointermove', onMove);
+      handle.addEventListener('pointerup', onUp);
+      handle.addEventListener('pointercancel', onUp);
+    });
+  }
+}
+
 function openNewThreadModal(projectId = '') {
   closeSettingsPopover();
   state.modal = { type: 'new-thread', projectId };
   const root = $('mc-modal-root');
   root.innerHTML = renderNewThreadModal(state.snap, { projectId });
   root.classList.remove('hidden');
+  initFloatingModal($('mc-new-thread-modal'));
   $('mc-nt-prompt')?.focus();
 }
 
@@ -702,6 +854,10 @@ function handleOpenFile(relPath) {
 }
 
 // ---------- Event Listeners ----------
+document.addEventListener('pointerdown', (e) => {
+  modalBackdropPointerDown = e.target === $('mc-modal-root');
+});
+
 document.addEventListener('click', (e) => {
   const railView = e.target.closest('[data-rail-view]');
   if (railView) {
@@ -801,7 +957,8 @@ document.addEventListener('click', (e) => {
     return;
   }
 
-  if (e.target.closest('[data-close-modal]') || e.target === $('mc-modal-root')) {
+  if (e.target.closest('[data-close-modal]') || (e.target === $('mc-modal-root') && modalBackdropPointerDown)) {
+    modalBackdropPointerDown = false;
     closeModal();
     return;
   }
@@ -944,6 +1101,9 @@ document.addEventListener('keydown', (e) => {
 window.addEventListener('resize', () => {
   if (window.innerWidth >= 1100 && state.inspectorOpen) {
     state.inspectorOpen = false;
+  }
+  if (state.modal?.type === 'new-thread' && state.newThreadModalRect) {
+    applyFloatingModalRect($('mc-new-thread-modal'), state.newThreadModalRect);
   }
   syncBackdrop();
 });
