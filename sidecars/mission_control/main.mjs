@@ -373,7 +373,10 @@ function readJsonBody(req) {
 
 function writeHttpResult(res, result, { closeSocket = false } = {}) {
   const status = result?.status || 200;
-  const headers = { 'Content-Type': result?.contentType || 'application/json; charset=utf-8' };
+  const headers = {
+    'Content-Type': result?.contentType || 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  };
   if (closeSocket) headers.Connection = 'close';
   res.writeHead(status, headers);
   res.end(result?.body ?? '', () => {

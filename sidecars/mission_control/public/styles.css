@@ -1997,6 +1997,173 @@ button {
   border-top: 1px solid var(--mc-border);
 }
 
+/* Floating (Draggable & Resizable) Modal */
+.mc-modal-floating {
+  position: fixed;
+  width: 520px;
+  max-width: none;
+  min-width: 360px;
+  min-height: 360px;
+  overflow: visible;
+}
+
+.mc-modal-floating .mc-modal-head {
+  cursor: grab;
+  user-select: none;
+  border-top-left-radius: var(--r-xl);
+  border-top-right-radius: var(--r-xl);
+}
+
+.mc-modal-floating.is-dragging .mc-modal-head {
+  cursor: grabbing;
+}
+
+.mc-modal-floating.is-dragging,
+.mc-modal-floating.is-resizing {
+  user-select: none;
+  box-shadow: 0 28px 64px rgba(0, 0, 0, 0.65);
+}
+
+.mc-modal-head-title {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.mc-modal-drag-grip {
+  color: var(--mc-fg-muted);
+  font-size: 12px;
+  line-height: 1;
+  letter-spacing: -1px;
+  opacity: 0.65;
+  transition: opacity 120ms ease;
+}
+
+.mc-modal-floating .mc-modal-head:hover .mc-modal-drag-grip {
+  opacity: 1;
+}
+
+.mc-modal-floating form {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.mc-modal-floating .mc-modal-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  max-height: none;
+  overflow-y: auto;
+}
+
+.mc-modal-floating .mc-field-grow {
+  flex: 1 1 auto;
+  min-height: 112px;
+}
+
+.mc-modal-floating .mc-textarea {
+  flex: 1 1 auto;
+  min-height: 92px;
+  resize: none;
+}
+
+.mc-modal-floating .mc-modal-foot {
+  flex: 0 0 auto;
+  border-bottom-left-radius: var(--r-xl);
+  border-bottom-right-radius: var(--r-xl);
+}
+
+.mc-resize-handle {
+  position: absolute;
+  z-index: 4;
+  touch-action: none;
+}
+
+.mc-resize-n {
+  top: -4px;
+  left: 10px;
+  right: 10px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.mc-resize-s {
+  bottom: -4px;
+  left: 10px;
+  right: 10px;
+  height: 8px;
+  cursor: ns-resize;
+}
+
+.mc-resize-e {
+  top: 10px;
+  bottom: 10px;
+  right: -4px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.mc-resize-w {
+  top: 10px;
+  bottom: 10px;
+  left: -4px;
+  width: 8px;
+  cursor: ew-resize;
+}
+
+.mc-resize-nw {
+  top: -5px;
+  left: -5px;
+  width: 14px;
+  height: 14px;
+  cursor: nwse-resize;
+}
+
+.mc-resize-ne {
+  top: -5px;
+  right: -5px;
+  width: 14px;
+  height: 14px;
+  cursor: nesw-resize;
+}
+
+.mc-resize-sw {
+  bottom: -5px;
+  left: -5px;
+  width: 14px;
+  height: 14px;
+  cursor: nesw-resize;
+}
+
+.mc-resize-se {
+  bottom: -4px;
+  right: -4px;
+  width: 16px;
+  height: 16px;
+  cursor: nwse-resize;
+}
+
+.mc-resize-se::after {
+  content: '';
+  position: absolute;
+  right: 6px;
+  bottom: 6px;
+  width: 8px;
+  height: 8px;
+  border-right: 1.75px solid var(--mc-fg-muted);
+  border-bottom: 1.75px solid var(--mc-fg-muted);
+  border-bottom-right-radius: 2px;
+  opacity: 0.55;
+  transition: opacity 120ms ease;
+}
+
+.mc-resize-se:hover::after,
+.mc-modal-floating.is-resizing .mc-resize-se::after {
+  opacity: 1;
+}
+
 /* Command Palette */
 .mc-palette-input-wrap {
   display: flex;
