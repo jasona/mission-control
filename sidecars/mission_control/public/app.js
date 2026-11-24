@@ -67,11 +67,50 @@
       if (!Number.isFinite(ms)) return String(ts);
       return new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(new Date(ms));
     }
+    function formatCountdown(ts, nowMs = Date.now()) {
+      if (!ts) return '';
+      const ms = typeof ts === 'number' ? ts : Date.parse(String(ts));
+      if (!Number.isFinite(ms) || ms <= 0) return '';
+      const diffMs = ms - nowMs;
+      if (diffMs <= 0) return 'Resetting';
+      if (diffMs < 60 * 1000) return '< 1m';
+      const totalMins = Math.round(diffMs / 60000);
+      if (totalMins < 60) return `${totalMins}m`;
+      const totalHours = Math.floor(totalMins / 60);
+      const remMins = totalMins % 60;
+      if (totalHours < 24) {
+        return remMins > 0 ? `${totalHours}h ${remMins}m` : `${totalHours}h`;
+      }
+      const days = Math.floor(totalHours / 24);
+      const remHours = totalHours % 24;
+      return remHours > 0 ? `${days}d ${remHours}h` : `${days}d`;
+    }
+    function formatResetClock(ts, nowMs = Date.now()) {
+      if (!ts) return '';
+      const ms = typeof ts === 'number' ? ts : Date.parse(String(ts));
+      if (!Number.isFinite(ms) || ms <= 0) return '';
+      const target = new Date(ms);
+      const base = new Date(nowMs);
+      const startOfBase = new Date(base.getFullYear(), base.getMonth(), base.getDate()).getTime();
+      const startOfTarget = new Date(target.getFullYear(), target.getMonth(), target.getDate()).getTime();
+      const dayDiff = Math.round((startOfTarget - startOfBase) / 86400000);
+      const clock = new Intl.DateTimeFormat(undefined, { hour: 'numeric', minute: '2-digit' }).format(target);
+      if (dayDiff === 0) return clock;
+      if (dayDiff === 1) return `Tomorrow ${clock}`;
+      return new Intl.DateTimeFormat(undefined, {
+        month: 'short',
+        day: 'numeric',
+        hour: 'numeric',
+        minute: '2-digit',
+      }).format(target);
+    }
 
     const ICONS = {
       grid: '<rect x="2.5" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="9" y="2.5" width="4.5" height="4.5" rx="1"/><rect x="2.5" y="9" width="4.5" height="4.5" rx="1"/><rect x="9" y="9" width="4.5" height="4.5" rx="1"/>',
       plus: '<path d="M8 3.25v9.5M3.25 8h9.5"/>',
       clock: '<circle cx="8" cy="8" r="5.5"/><path d="M8 4.75V8l2.25 1.5"/>',
+      gauge: '<path d="M3 11.25a5.5 5.5 0 1 1 10 0"/><path d="M8 9.25 10.75 6.25"/><circle cx="8" cy="9.5" r="1" class="fill"/>',
+      refresh: '<path d="M13 6.25A5.25 5.25 0 0 0 3.6 4.9M3 9.75A5.25 5.25 0 0 0 12.4 11.1"/><path d="M13.25 3.5v2.75H10.5M2.75 12.5V9.75H5.5"/>',
       puzzle: '<path d="M6.25 3a1.5 1.5 0 0 1 3 0v.75H11a1.25 1.25 0 0 1 1.25 1.25v1.75H13a1.5 1.5 0 0 1 0 3h-.75V11.5A1.25 1.25 0 0 1 11 12.75H5A1.25 1.25 0 0 1 3.75 11.5V9.75H4.5a1.5 1.5 0 0 0 0-3h-.75V5A1.25 1.25 0 0 1 5 3.75h1.25z"/>',
       gear: '<circle cx="8" cy="8" r="2.2"/><path d="M8 2.25v1.2M8 12.55v1.2M3.93 3.93l.85.85M11.22 11.22l.85.85M2.25 8h1.2M12.55 8h1.2M3.93 12.07l.85-.85M11.22 4.78l.85-.85"/>',
       folder: '<path d="M2.25 4.5a1.25 1.25 0 0 1 1.25-1.25h2.7l1.2 1.5h5.1a1.25 1.25 0 0 1 1.25 1.25v5.5a1.25 1.25 0 0 1-1.25 1.25h-9a1.25 1.25 0 0 1-1.25-1.25z"/>',
@@ -102,7 +141,7 @@
       return `<span class="${cls}" aria-hidden="true"></span>`;
     }
 
-    return { esc: esc, safeTone: safeTone, highlightMentions: highlightMentions, formatShortTime: formatShortTime, formatClock: formatClock, icon: icon, dotHtml: dotHtml };
+    return { esc: esc, safeTone: safeTone, highlightMentions: highlightMentions, formatShortTime: formatShortTime, formatClock: formatClock, formatCountdown: formatCountdown, formatResetClock: formatResetClock, icon: icon, dotHtml: dotHtml };
   })();
   // --- components/modal.js ---
   __MC["components/modal.js"] = (() => {
@@ -176,6 +215,7 @@
         { id: 'view-board', label: 'Go to Board', meta: 'View', action: { type: 'view', view: 'board' } },
         { id: 'view-timeline', label: 'Go to Timeline', meta: 'View', action: { type: 'view', view: 'timeline' } },
         { id: 'view-graph', label: 'Go to Graph', meta: 'View', action: { type: 'view', view: 'graph' } },
+        { id: 'view-usage', label: 'Go to Usage & Quotas', meta: 'View', action: { type: 'view', view: 'usage' } },
       ];
 
       for (const att of snap?.needsAttention || []) {
@@ -1333,6 +1373,321 @@
 
     return { renderInspectorContent: renderInspectorContent, renderInspectorComposer: renderInspectorComposer };
   })();
+  // --- views/usage.js ---
+  __MC["views/usage.js"] = (() => {
+    const { dotHtml, esc, formatClock, formatCountdown, formatResetClock, icon, safeTone } = __MC["components/icons.js"];
+    const STATUS_LABELS = {
+      healthy: 'Healthy',
+      low: 'Low',
+      critical: 'Critical',
+      exhausted: 'Exhausted',
+      unknown: 'Unknown',
+    };
+
+    const FILTER_OPTIONS = [
+      { id: 'all', label: 'All' },
+      { id: 'gemini', label: 'Gemini' },
+      { id: 'claude', label: 'Claude' },
+      { id: 'gpt', label: 'GPT' },
+      { id: 'low', label: 'Low Quota' },
+    ];
+
+    function formatNumber(n) {
+      const num = Number(n);
+      if (!Number.isFinite(num)) return '0';
+      return new Intl.NumberFormat().format(num);
+    }
+
+    function matchesUsageItem(item, filter, query) {
+      if (filter === 'low') {
+        if (!['low', 'critical', 'exhausted'].includes(item.status)) return false;
+      } else if (filter !== 'all') {
+        if (item.provider !== filter) return false;
+      }
+      if (!query) return true;
+      const hay = [
+        item.displayName,
+        item.label,
+        item.id,
+        item.providerLabel,
+        item.tagTitle,
+        item.tagDescription,
+      ]
+        .filter(Boolean)
+        .join(' ')
+        .toLowerCase();
+      return hay.includes(query);
+    }
+
+    function renderPoolCard(pool, nowMs) {
+      const tone = safeTone(pool.tone, 'muted');
+      const hasPct = typeof pool.remainingPct === 'number';
+      const pct = hasPct ? Math.min(100, Math.max(0, pool.remainingPct)) : null;
+      const widthPct = pct === null ? 0 : pct;
+      const statusLabel = STATUS_LABELS[pool.status] || 'Unknown';
+      const cd = formatCountdown(pool.resetTime || pool.resetMs, nowMs);
+      const clk = formatResetClock(pool.resetTime || pool.resetMs, nowMs);
+      const resetText = cd
+        ? (cd === 'Resetting' ? 'Resetting shortly' : `Resets in ${cd}${clk ? ` · ${clk}` : ''}`)
+        : 'No active reset window';
+
+      const providersHtml = (pool.providerLabels || [])
+        .map((p) => `<span class="mc-code-pill">${esc(p)}</span>`)
+        .join('');
+
+      const familiesHtml = (pool.familyNames || [])
+        .map((name) => `<span class="mc-pool-family-chip">${esc(name)}</span>`)
+        .join('');
+
+      return `
+        <article class="mc-pool-card tone-${esc(tone)}" data-pool-id="${esc(pool.id)}">
+          <div class="mc-pool-head">
+            <div class="mc-pool-title-wrap">
+              <h3 class="mc-pool-name">${esc(pool.name || 'Quota Pool')}</h3>
+              <div class="mc-pool-providers">${providersHtml}</div>
+            </div>
+            <span class="mc-status-badge tone-${esc(tone)}">${dotHtml(tone)} ${esc(statusLabel)}</span>
+          </div>
+
+          <div class="mc-pool-metrics">
+            <div class="mc-pool-pct-group">
+              <span class="mc-pool-pct">${pct === null ? '—' : `${pct}%`}</span>
+              <span class="mc-pool-pct-label">remaining</span>
+              ${typeof pool.usedPct === 'number' ? `<span class="mc-pool-used">${pool.usedPct}% used</span>` : ''}
+            </div>
+            <div class="mc-pool-reset">${icon('clock')}<span>${esc(resetText)}</span></div>
+          </div>
+
+          <div class="mc-meter-track" role="progressbar" aria-label="${esc(pool.name || 'Quota pool')} remaining quota" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct === null ? 0 : pct}">
+            <div class="mc-meter-fill tone-${esc(tone)}" style="width: ${widthPct}%;"></div>
+          </div>
+
+          ${familiesHtml ? `<div class="mc-pool-families">${familiesHtml}</div>` : ''}
+        </article>
+      `;
+    }
+
+    function renderCreditsStrip(usage) {
+      const cards = [];
+      for (const c of usage.credits || []) {
+        const val = c.amount !== null && c.amount !== undefined ? formatNumber(c.amount) : '0';
+        const note = c.minimumForUsage > 0
+          ? `Min ${formatNumber(c.minimumForUsage)} required for overage usage`
+          : 'Available for overage runs';
+        cards.push(`
+          <article class="mc-credit-card">
+            <div class="mc-credit-label">${esc(c.label || 'AI Credits')}</div>
+            <div class="mc-credit-value">${esc(val)}</div>
+            <div class="mc-credit-sub">${esc(note)}</div>
+          </article>
+        `);
+      }
+
+      const pc = usage.planCredits || {};
+      if (pc.promptAvailable !== null && pc.promptAvailable !== undefined) {
+        cards.push(`
+          <article class="mc-credit-card">
+            <div class="mc-credit-label">Prompt Credits</div>
+            <div class="mc-credit-value">${esc(formatNumber(pc.promptAvailable))}</div>
+            <div class="mc-credit-sub">Available plan prompt balance</div>
+          </article>
+        `);
+      }
+      if (pc.flowAvailable !== null && pc.flowAvailable !== undefined) {
+        cards.push(`
+          <article class="mc-credit-card">
+            <div class="mc-credit-label">Flow Credits</div>
+            <div class="mc-credit-value">${esc(formatNumber(pc.flowAvailable))}</div>
+            <div class="mc-credit-sub">Available agent flow balance</div>
+          </article>
+        `);
+      }
+
+      if (!cards.length) return '';
+      return `
+        <section class="mc-section">
+          <div class="mc-section-head">
+            <span class="mc-section-label">Credits &amp; Plan Allocation</span>
+          </div>
+          <div class="mc-usage-credits-grid">${cards.join('')}</div>
+        </section>
+      `;
+    }
+
+    function renderModelRow(item, mode, nowMs) {
+      const isFamily = mode !== 'variants';
+      const title = isFamily ? (item.displayName || item.id) : (item.label || item.id);
+      const tone = safeTone(item.tone, 'muted');
+      const hasPct = typeof item.remainingPct === 'number';
+      const pct = hasPct ? Math.min(100, Math.max(0, item.remainingPct)) : null;
+      const cd = formatCountdown(item.resetTime || item.resetMs, nowMs);
+      const tagText = String(item.tagTitle || '').trim();
+      const tagTone = /leaving|notice/i.test(tagText) ? 'amber' : 'blue';
+
+      const subPills = isFamily && Array.isArray(item.thinkingLevels) && item.thinkingLevels.length
+        ? item.thinkingLevels.map((lvl) => `<span class="mc-thinking-pill">${esc(lvl)}</span>`).join('')
+        : `<span class="mc-code-pill">${esc(item.id)}</span>`;
+
+      return `
+        <div class="mc-model-meter-row">
+          <div class="mc-model-meter-main">
+            <div class="mc-model-meter-title-row">
+              ${dotHtml(tone)}
+              <span class="mc-model-meter-name">${esc(title)}</span>
+              <span class="mc-code-pill">${esc(item.providerLabel || 'Model')}</span>
+              ${item.isDefault ? '<span class="mc-status-badge tone-blue">Default</span>' : ''}
+              ${tagText ? `<span class="mc-status-badge tone-${tagTone}">${esc(tagText)}</span>` : ''}
+            </div>
+            <div class="mc-model-meter-meta">
+              <div class="mc-model-thinking-list">${subPills}</div>
+              ${item.tagDescription ? `<span class="mc-model-desc">${esc(item.tagDescription)}</span>` : ''}
+            </div>
+          </div>
+
+          <div class="mc-model-meter-right">
+            <div class="mc-meter-track is-compact" role="progressbar" aria-label="${esc(title)} remaining quota" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct === null ? 0 : pct}">
+              <div class="mc-meter-fill tone-${esc(tone)}" style="width: ${pct === null ? 0 : pct}%;"></div>
+            </div>
+            <span class="mc-model-pct tone-${esc(tone)}">${pct === null ? '—' : `${pct}%`}</span>
+            <span class="mc-model-reset">${esc(cd || '—')}</span>
+          </div>
+        </div>
+      `;
+    }
+    function renderUsage(usage, state = {}) {
+      const nowMs = Date.now();
+      const loading = Boolean(state.usageLoading);
+
+      if (!usage) {
+        return `
+          <div class="mc-usage-view">
+            <div class="mc-empty">
+              <p class="mc-empty-title">Loading quota meters…</p>
+              <p class="mc-empty-sub">Querying Antigravity language server quota status and model pools.</p>
+            </div>
+          </div>
+        `;
+      }
+
+      if (usage.available === false) {
+        return `
+          <div class="mc-usage-view">
+            <div class="mc-usage-unavailable">
+              <div class="mc-usage-unavail-icon">${icon('gauge')}</div>
+              <h2 class="mc-empty-title">Live usage meters unavailable</h2>
+              <p class="mc-empty-sub">${esc(usage.error || 'An active Antigravity language server connection is required to inspect live account quotas.')}</p>
+              <div class="mc-usage-unavail-actions">
+                <button type="button" class="mc-btn-subtle is-strong" data-action="refresh-usage"${loading ? ' disabled' : ''}>
+                  ${icon('refresh', loading ? 'is-spinning' : '')}
+                  <span>${loading ? 'Refreshing…' : 'Retry'}</span>
+                </button>
+                <button type="button" class="mc-btn-primary" data-action="load-demo">Preview Demo Meters</button>
+              </div>
+            </div>
+          </div>
+        `;
+      }
+
+      const summary = usage.summary || {};
+      const plan = usage.plan || {};
+      const pools = Array.isArray(usage.pools) ? usage.pools : [];
+      const families = Array.isArray(usage.families) ? usage.families : [];
+      const models = Array.isArray(usage.models) ? usage.models : [];
+
+      const q = String(state.search || '').trim().toLowerCase();
+      const usageFilter = state.usageFilter || 'all';
+      const usageMode = state.usageMode === 'variants' ? 'variants' : 'families';
+
+      const nextResetCd = formatCountdown(summary.nextResetTime || summary.nextResetMs, nowMs);
+      const updatedClock = usage.fetchedAt ? formatClock(usage.fetchedAt) : '';
+
+      const filteredPools = q
+        ? pools.filter((p) => {
+            const hay = `${p.name} ${(p.providerLabels || []).join(' ')} ${(p.familyNames || []).join(' ')}`.toLowerCase();
+            return hay.includes(q);
+          })
+        : pools;
+
+      const sourceItems = usageMode === 'variants' ? models : families;
+      const filteredItems = sourceItems.filter((item) => matchesUsageItem(item, usageFilter, q));
+
+      const filterCounts = {
+        all: sourceItems.length,
+        gemini: sourceItems.filter((i) => i.provider === 'gemini').length,
+        claude: sourceItems.filter((i) => i.provider === 'claude').length,
+        gpt: sourceItems.filter((i) => i.provider === 'gpt').length,
+        low: sourceItems.filter((i) => ['low', 'critical', 'exhausted'].includes(i.status)).length,
+      };
+
+      const heroStats = [
+        `${summary.poolCount ?? pools.length} ${(summary.poolCount ?? pools.length) === 1 ? 'Shared Pool' : 'Shared Pools'}`,
+        `${summary.familyCount ?? families.length} Model ${(summary.familyCount ?? families.length) === 1 ? 'Family' : 'Families'}`,
+        nextResetCd ? `Next reset ${nextResetCd === 'Resetting' ? 'soon' : `in ${nextResetCd}`}` : '',
+      ].filter(Boolean).join(' · ');
+
+      const poolsHtml = filteredPools.length
+        ? filteredPools.map((p) => renderPoolCard(p, nowMs)).join('')
+        : '<div class="mc-empty"><p class="mc-empty-sub">No quota pools match the current search.</p></div>';
+
+      const rowsHtml = filteredItems.length
+        ? filteredItems.map((item) => renderModelRow(item, usageMode, nowMs)).join('')
+        : '<div class="mc-empty" style="padding: 20px;"><p class="mc-empty-sub">No models match this filter or search query.</p></div>';
+
+      return `
+        <div class="mc-usage-view">
+          <div class="mc-usage-hero-bar">
+            <div class="mc-usage-hero-left">
+              <span class="mc-status-badge tone-blue">${esc(plan.name || 'Antigravity')}</span>
+              ${usage.mode === 'demo' ? '<span class="mc-mode-chip">Demo Meters</span>' : ''}
+              <span class="mc-usage-hero-stats">${esc(heroStats)}</span>
+            </div>
+            <div class="mc-usage-hero-right">
+              ${updatedClock ? `<span class="mc-usage-updated">Updated ${esc(updatedClock)}</span>` : ''}
+              <button type="button" class="mc-btn-subtle" data-action="refresh-usage"${loading ? ' disabled' : ''}>
+                ${icon('refresh', loading ? 'is-spinning' : '')}
+                <span>${loading ? 'Refreshing…' : 'Refresh'}</span>
+              </button>
+            </div>
+          </div>
+
+          <section class="mc-section">
+            <div class="mc-section-head">
+              <span class="mc-section-label">Shared Quota Pools</span>
+              ${summary.lowPoolCount > 0 ? `<span class="mc-section-count tone-amber">${summary.lowPoolCount} low quota</span>` : ''}
+            </div>
+            <div class="mc-usage-pools-grid">${poolsHtml}</div>
+          </section>
+
+          ${renderCreditsStrip(usage)}
+
+          <section class="mc-section mc-usage-models-section">
+            <div class="mc-usage-models-bar">
+              <div class="mc-usage-models-head-left">
+                <span class="mc-section-label">Model Quota Breakdown</span>
+                <div class="mc-filter-group" role="group" aria-label="Filter models by provider or status">
+                  ${FILTER_OPTIONS.map((opt) => {
+                    const count = filterCounts[opt.id] ?? 0;
+                    if (opt.id !== 'all' && opt.id !== 'low' && count === 0) return '';
+                    const active = usageFilter === opt.id ? ' active' : '';
+                    return `<button type="button" class="mc-filter-pill${active}" data-usage-filter="${esc(opt.id)}"><span>${esc(opt.label)}</span><span class="mc-pill-count">${count}</span></button>`;
+                  }).join('')}
+                </div>
+              </div>
+
+              <div class="mc-toggle-group" role="group" aria-label="Model grouping mode">
+                <button type="button" class="mc-toggle-btn${usageMode === 'families' ? ' active' : ''}" data-usage-mode="families">Families (${families.length})</button>
+                <button type="button" class="mc-toggle-btn${usageMode === 'variants' ? ' active' : ''}" data-usage-mode="variants">All Variants (${models.length})</button>
+              </div>
+            </div>
+
+            <div class="mc-model-meter-list">${rowsHtml}</div>
+          </section>
+        </div>
+      `;
+    }
+
+    return { renderUsage: renderUsage };
+  })();
   // --- app-main.js ---
   __MC["app-main.js"] = (() => {
     const { esc, icon } = __MC["components/icons.js"];
@@ -1342,8 +1697,12 @@
     const { renderInspectorComposer, renderInspectorContent } = __MC["views/inspector.js"];
     const { renderOverview } = __MC["views/overview.js"];
     const { renderTimeline } = __MC["views/timeline.js"];
+    const { renderUsage } = __MC["views/usage.js"];
     const params = new URLSearchParams(location.search);
     const initialDemoParam = params.get('demo');
+    const VALID_VIEWS = new Set(['overview', 'board', 'timeline', 'graph', 'usage']);
+    const initialViewParam = String(params.get('view') || '').toLowerCase();
+    const initialView = VALID_VIEWS.has(initialViewParam) ? initialViewParam : 'overview';
 
     async function apiFetch(url, opts = {}) {
       const method = String(opts?.method || 'GET').toUpperCase();
@@ -1364,9 +1723,14 @@
 
     const state = {
       demo: initialDemoParam === '1' ? true : initialDemoParam === '0' ? false : null,
-      view: 'overview', // overview | board | timeline | graph
+      view: initialView, // overview | board | timeline | graph | usage
       filter: 'all', // all | attention | running
       search: '',
+      usage: null,
+      usageLoading: false,
+      usageFetchedAt: 0,
+      usageFilter: 'all', // all | gemini | claude | gpt | low
+      usageMode: 'families', // families | variants
       etag: '',
       snap: null,
       selectedThreadId: '',
@@ -1503,6 +1867,38 @@
       }
     }
 
+    let usageInFlight = false;
+    const USAGE_POLL_MS = 30000;
+
+    async function loadUsage(force = false) {
+      if (usageInFlight) return;
+      usageInFlight = true;
+      state.usageLoading = true;
+      if (state.view === 'usage' && (!state.usage || force)) {
+        renderActiveView();
+      }
+      try {
+        const data = await fetchJson(withQuery('/api/usage', force ? { refresh: '1' } : {}), { method: 'GET' });
+        state.usage = data;
+        state.usageFetchedAt = Date.now();
+      } catch (err) {
+        if (!state.usage) {
+          state.usage = {
+            available: false,
+            error: err?.message || 'Unable to query Antigravity usage meters',
+          };
+        } else if (force) {
+          showToast(err?.message || 'Failed to refresh usage meters', 'red');
+        }
+      } finally {
+        state.usageLoading = false;
+        usageInFlight = false;
+        if (state.view === 'usage') {
+          renderActiveView();
+        }
+      }
+    }
+
     function renderFatalError(title, detail) {
       const subtitle = $('mc-subtitle');
       if (subtitle && (!state.snap || subtitle.textContent.startsWith('Loading'))) {
@@ -1543,6 +1939,9 @@
         if (state.selectedThreadId) {
           await loadThreadDetail(state.selectedThreadId, force);
         }
+        if (state.view === 'usage' && (!state.usage || Date.now() - state.usageFetchedAt >= USAGE_POLL_MS)) {
+          loadUsage(false);
+        }
       } catch (err) {
         if (!state.snap || $('mc-subtitle')?.textContent?.startsWith('Loading')) {
           renderFatalError('Unable to reach Mission Control API', err?.message || String(err));
@@ -1579,6 +1978,7 @@
       const rail = $('mc-rail');
       const overviewActive = state.view === 'overview' && !state.pluginsOpen && !state.settingsOpen;
       const timelineActive = state.view === 'timeline' && !state.pluginsOpen && !state.settingsOpen;
+      const usageActive = state.view === 'usage' && !state.pluginsOpen && !state.settingsOpen;
 
       rail.innerHTML = `
         <button type="button" class="mc-rail-btn${overviewActive ? ' active' : ''}" data-rail-view="overview" title="Mission Control Overview" aria-label="Mission Control Overview">
@@ -1589,6 +1989,9 @@
         </button>
         <button type="button" class="mc-rail-btn${timelineActive ? ' active' : ''}" data-rail-view="timeline" title="Timeline" aria-label="Timeline">
           ${icon('clock')}
+        </button>
+        <button type="button" class="mc-rail-btn${usageActive ? ' active' : ''}" data-rail-view="usage" title="Usage & Quota Meters" aria-label="Usage and Quota Meters">
+          ${icon('gauge')}
         </button>
         <button type="button" class="mc-rail-btn${state.pluginsOpen ? ' active' : ''}" data-action="toggle-plugins" title="Plugins & Sidecars" aria-label="Plugins and Sidecars">
           ${icon('puzzle')}
@@ -1607,10 +2010,21 @@
       const sCount = summary.liveSwarmCount ?? 0;
       const aCount = summary.needsAttentionCount ?? (state.snap?.needsAttention?.length || 0);
       const rCount = summary.runningCount ?? 0;
+      const isUsage = state.view === 'usage';
 
-      $('mc-subtitle').textContent = `${plural(pCount, 'Project')} · ${plural(tCount, 'Thread')} · ${plural(sCount, 'Live Swarm')}`;
+      if (state.snap) {
+        $('mc-subtitle').textContent = `${plural(pCount, 'Project')} · ${plural(tCount, 'Thread')} · ${plural(sCount, 'Live Swarm')}`;
+      }
       $('mc-count-attention').textContent = String(aCount);
       $('mc-count-running').textContent = String(rCount);
+
+      $('mc-app')?.classList.toggle('is-full-width', isUsage);
+      $('mc-filters')?.classList.toggle('hidden', isUsage);
+      const searchInput = $('mc-search');
+      if (searchInput) {
+        searchInput.placeholder = isUsage ? 'Search models & pools...' : 'Search projects & threads...';
+        searchInput.setAttribute('aria-label', isUsage ? 'Search models and quota pools' : 'Search projects and threads');
+      }
 
       document.querySelectorAll('#mc-view-tabs .mc-seg-btn').forEach((btn) => {
         const active = btn.dataset.view === state.view;
@@ -1625,6 +2039,11 @@
 
     function renderActiveView() {
       const container = $('mc-view');
+      if (state.view === 'usage') {
+        container.innerHTML = renderUsage(state.usage, state);
+        return;
+      }
+
       if (!state.snap) {
         container.innerHTML = '<div class="mc-empty"><p class="mc-empty-sub">Scanning projects, Git worktrees, Swarms, and scheduled jobs…</p></div>';
         return;
@@ -1736,7 +2155,7 @@
     }
 
     function syncBackdrop() {
-      const show = state.pluginsOpen || (state.inspectorOpen && window.innerWidth < 1100);
+      const show = state.pluginsOpen || (state.view !== 'usage' && state.inspectorOpen && window.innerWidth < 1100);
       $('mc-backdrop').classList.toggle('hidden', !show);
     }
 
@@ -1985,10 +2404,14 @@
 
     // ---------- Actions & State Transitions ----------
     function setView(view) {
-      state.view = view;
+      state.view = VALID_VIEWS.has(view) ? view : 'overview';
       renderRail();
       renderHeader();
+      syncBackdrop();
       renderActiveView();
+      if (state.view === 'usage' && (!state.usage || Date.now() - state.usageFetchedAt >= USAGE_POLL_MS)) {
+        loadUsage(false);
+      }
     }
 
     function setFilter(filter) {
@@ -2003,10 +2426,15 @@
       state.selectedThreadId = '';
       state.detail = null;
       state.composerDraft = '';
+      state.usage = null;
+      state.usageFetchedAt = 0;
       if (state.settingsOpen) {
         $('mc-settings-popover').innerHTML = renderSettingsPopover(state);
       }
       pollDashboard(true);
+      if (state.view === 'usage') {
+        loadUsage(true);
+      }
     }
 
     function isUnseenDoneThread(threadId) {
@@ -2039,6 +2467,11 @@
 
     async function selectThread(threadId, opts = {}) {
       if (!threadId) return;
+      if (state.view === 'usage') {
+        state.view = 'overview';
+        renderRail();
+        renderHeader();
+      }
       const changed = state.selectedThreadId !== threadId;
       state.selectedThreadId = threadId;
       if (changed) {
@@ -2209,6 +2642,20 @@
         return;
       }
 
+      const usageFilterBtn = e.target.closest('[data-usage-filter]');
+      if (usageFilterBtn) {
+        state.usageFilter = usageFilterBtn.dataset.usageFilter || 'all';
+        renderActiveView();
+        return;
+      }
+
+      const usageModeBtn = e.target.closest('[data-usage-mode]');
+      if (usageModeBtn) {
+        state.usageMode = usageModeBtn.dataset.usageMode === 'variants' ? 'variants' : 'families';
+        renderActiveView();
+        return;
+      }
+
       const attAction = e.target.closest('[data-attention-action]');
       if (attAction) {
         e.stopPropagation();
@@ -2302,6 +2749,7 @@
         else if (action === 'toggle-settings') toggleSettingsPopover();
         else if (action === 'close-settings') closeSettingsPopover();
         else if (action === 'load-demo') setDemoMode(true);
+        else if (action === 'refresh-usage') loadUsage(true);
         else if (action === 'clear-filters') {
           state.filter = 'all';
           state.search = '';
@@ -2454,6 +2902,11 @@
 
     try {
       renderRail();
+      renderHeader();
+      if (state.view === 'usage') {
+        renderActiveView();
+        loadUsage(false);
+      }
       pollDashboard(true);
       resetPollTimer();
     } catch (err) {

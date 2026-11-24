@@ -70,6 +70,7 @@ export function buildPaletteItems(snap, query, isDemo) {
     { id: 'view-board', label: 'Go to Board', meta: 'View', action: { type: 'view', view: 'board' } },
     { id: 'view-timeline', label: 'Go to Timeline', meta: 'View', action: { type: 'view', view: 'timeline' } },
     { id: 'view-graph', label: 'Go to Graph', meta: 'View', action: { type: 'view', view: 'graph' } },
+    { id: 'view-usage', label: 'Go to Usage & Quotas', meta: 'View', action: { type: 'view', view: 'usage' } },
   ];
 
   for (const att of snap?.needsAttention || []) {

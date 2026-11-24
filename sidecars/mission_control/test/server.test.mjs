@@ -10,6 +10,7 @@ import { resetActionsState } from '../lib/actions.mjs';
 import { resetDemoState } from '../lib/demo.mjs';
 import { clearGitCache } from '../lib/git.mjs';
 import { clearSeenCache } from '../lib/seen.mjs';
+import { clearUsageCache } from '../lib/usage.mjs';
 import { startStandaloneServer } from '../main.mjs';
 import { renderInspectorContent } from '../public/views/inspector.js';
 import { renderOverview } from '../public/views/overview.js';
@@ -141,6 +142,7 @@ test('standalone demo server serves static assets, preload stub, dashboard etag,
   assert.match(htmlRes.headers.get('content-type') || '', /text\/html/);
   const htmlText = await htmlRes.text();
   assert.match(htmlText, /Mission Control/);
+  assert.match(htmlText, /data-view="usage"/);
   assert.match(htmlText, /\/preload\.js/);
   assert.match(htmlText, /<script src="\/app\.js(?:\?v=[a-f0-9]+)?"><\/script>/);
   assert.equal(/type=["']module["']/.test(htmlText), false);
@@ -163,6 +165,7 @@ test('standalone demo server serves static assets, preload stub, dashboard etag,
     '/views/timeline.js',
     '/views/graph.js',
     '/views/inspector.js',
+    '/views/usage.js',
     '/components/modal.js',
     '/components/icons.js',
   ]) {
@@ -177,6 +180,16 @@ test('standalone demo server serves static assets, preload stub, dashboard etag,
   const preloadText = await preloadRes.text();
   assert.match(preloadText, /window\.sidecar/);
   assert.match(preloadText, /#0d0e11/);
+
+  // Demo usage endpoint
+  const usageRes = await fetchJson(`${srv.url}/api/usage`);
+  assert.equal(usageRes.status, 200);
+  assert.equal(usageRes.json.mode, 'demo');
+  assert.equal(usageRes.json.available, true);
+  assert.equal(usageRes.json.pools.length, 3);
+  assert.ok(usageRes.json.families.length >= 5);
+  assert.ok(usageRes.json.models.length >= 20);
+  assert.equal(usageRes.json.credits.length, 1);
 
   // Dashboard + etag unchanged check
   const dash1 = await fetchJson(`${srv.url}/api/dashboard`);
@@ -410,4 +423,53 @@ test('live workspace fixture server handles live telemetry, ?demo=1, invalid/wei
   assert.equal(lsDownRes.status, 503);
   assert.equal(lsDownRes.json.ok, false);
   assert.equal(lsDownRes.json.code, 'LS_UNAVAILABLE');
+
+  // Method check & graceful unavailable live /api/usage without LS config
+  clearUsageCache();
+  const postUsageRes = await fetchJson(`${srv.url}/api/usage`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: '{}',
+  });
+  assert.equal(postUsageRes.status, 405);
+
+  const srvNoLs = await startStandaloneServer({
+    ...fx.serverOptions,
+    lsAddress: '',
+    csrfToken: '',
+  });
+  t.after(async () => srvNoLs.close());
+  const noLsUsage = await fetchJson(`${srvNoLs.url}/api/usage`);
+  assert.equal(noLsUsage.status, 200);
+  assert.equal(noLsUsage.json.available, false);
+  assert.equal(noLsUsage.json.code, 'LS_NOT_CONFIGURED');
+
+  // Live /api/usage with injected usageFetcher returns normalized pools without PII
+  const srvMockLs = await startStandaloneServer({
+    ...fx.serverOptions,
+    usageFetcher: async () => ({
+      userStatus: {
+        name: 'Private Name',
+        email: 'private@example.com',
+        userTier: { id: 'pro', name: 'Google AI Pro' },
+        cascadeModelConfigData: {
+          clientModelConfigs: [
+            {
+              modelId: 'gemini-4-neon-high',
+              label: 'Gemini 4 Neon (High)',
+              quotaInfo: { remainingFraction: 0.72, resetTime: '2026-11-24T23:47:42Z' },
+            },
+          ],
+        },
+      },
+    }),
+  });
+  t.after(async () => srvMockLs.close());
+  const mockLiveUsage = await fetchJson(`${srvMockLs.url}/api/usage`);
+  assert.equal(mockLiveUsage.status, 200);
+  assert.equal(mockLiveUsage.json.available, true);
+  assert.equal(mockLiveUsage.json.mode, 'live');
+  assert.equal(mockLiveUsage.json.pools[0].name, 'Gemini Pool');
+  assert.equal(mockLiveUsage.json.pools[0].remainingPct, 72);
+  assert.equal(JSON.stringify(mockLiveUsage.json).includes('private@example.com'), false);
 });

@@ -11,9 +11,13 @@ import { renderGraph } from './views/graph.js';
 import { renderInspectorComposer, renderInspectorContent } from './views/inspector.js';
 import { renderOverview } from './views/overview.js';
 import { renderTimeline } from './views/timeline.js';
+import { renderUsage } from './views/usage.js';
 
 const params = new URLSearchParams(location.search);
 const initialDemoParam = params.get('demo');
+const VALID_VIEWS = new Set(['overview', 'board', 'timeline', 'graph', 'usage']);
+const initialViewParam = String(params.get('view') || '').toLowerCase();
+const initialView = VALID_VIEWS.has(initialViewParam) ? initialViewParam : 'overview';
 
 async function apiFetch(url, opts = {}) {
   const method = String(opts?.method || 'GET').toUpperCase();
@@ -34,9 +38,14 @@ async function apiFetch(url, opts = {}) {
 
 const state = {
   demo: initialDemoParam === '1' ? true : initialDemoParam === '0' ? false : null,
-  view: 'overview', // overview | board | timeline | graph
+  view: initialView, // overview | board | timeline | graph | usage
   filter: 'all', // all | attention | running
   search: '',
+  usage: null,
+  usageLoading: false,
+  usageFetchedAt: 0,
+  usageFilter: 'all', // all | gemini | claude | gpt | low
+  usageMode: 'families', // families | variants
   etag: '',
   snap: null,
   selectedThreadId: '',
@@ -173,6 +182,38 @@ async function loadThreadDetail(threadId, force = false) {
   }
 }
 
+let usageInFlight = false;
+const USAGE_POLL_MS = 30000;
+
+async function loadUsage(force = false) {
+  if (usageInFlight) return;
+  usageInFlight = true;
+  state.usageLoading = true;
+  if (state.view === 'usage' && (!state.usage || force)) {
+    renderActiveView();
+  }
+  try {
+    const data = await fetchJson(withQuery('/api/usage', force ? { refresh: '1' } : {}), { method: 'GET' });
+    state.usage = data;
+    state.usageFetchedAt = Date.now();
+  } catch (err) {
+    if (!state.usage) {
+      state.usage = {
+        available: false,
+        error: err?.message || 'Unable to query Antigravity usage meters',
+      };
+    } else if (force) {
+      showToast(err?.message || 'Failed to refresh usage meters', 'red');
+    }
+  } finally {
+    state.usageLoading = false;
+    usageInFlight = false;
+    if (state.view === 'usage') {
+      renderActiveView();
+    }
+  }
+}
+
 function renderFatalError(title, detail) {
   const subtitle = $('mc-subtitle');
   if (subtitle && (!state.snap || subtitle.textContent.startsWith('Loading'))) {
@@ -213,6 +254,9 @@ async function pollDashboard(force = false) {
     if (state.selectedThreadId) {
       await loadThreadDetail(state.selectedThreadId, force);
     }
+    if (state.view === 'usage' && (!state.usage || Date.now() - state.usageFetchedAt >= USAGE_POLL_MS)) {
+      loadUsage(false);
+    }
   } catch (err) {
     if (!state.snap || $('mc-subtitle')?.textContent?.startsWith('Loading')) {
       renderFatalError('Unable to reach Mission Control API', err?.message || String(err));
@@ -249,6 +293,7 @@ function renderRail() {
   const rail = $('mc-rail');
   const overviewActive = state.view === 'overview' && !state.pluginsOpen && !state.settingsOpen;
   const timelineActive = state.view === 'timeline' && !state.pluginsOpen && !state.settingsOpen;
+  const usageActive = state.view === 'usage' && !state.pluginsOpen && !state.settingsOpen;
 
   rail.innerHTML = `
     <button type="button" class="mc-rail-btn${overviewActive ? ' active' : ''}" data-rail-view="overview" title="Mission Control Overview" aria-label="Mission Control Overview">
@@ -259,6 +304,9 @@ function renderRail() {
     </button>
     <button type="button" class="mc-rail-btn${timelineActive ? ' active' : ''}" data-rail-view="timeline" title="Timeline" aria-label="Timeline">
       ${icon('clock')}
+    </button>
+    <button type="button" class="mc-rail-btn${usageActive ? ' active' : ''}" data-rail-view="usage" title="Usage & Quota Meters" aria-label="Usage and Quota Meters">
+      ${icon('gauge')}
     </button>
     <button type="button" class="mc-rail-btn${state.pluginsOpen ? ' active' : ''}" data-action="toggle-plugins" title="Plugins & Sidecars" aria-label="Plugins and Sidecars">
       ${icon('puzzle')}
@@ -277,10 +325,21 @@ function renderHeader() {
   const sCount = summary.liveSwarmCount ?? 0;
   const aCount = summary.needsAttentionCount ?? (state.snap?.needsAttention?.length || 0);
   const rCount = summary.runningCount ?? 0;
+  const isUsage = state.view === 'usage';
 
-  $('mc-subtitle').textContent = `${plural(pCount, 'Project')} · ${plural(tCount, 'Thread')} · ${plural(sCount, 'Live Swarm')}`;
+  if (state.snap) {
+    $('mc-subtitle').textContent = `${plural(pCount, 'Project')} · ${plural(tCount, 'Thread')} · ${plural(sCount, 'Live Swarm')}`;
+  }
   $('mc-count-attention').textContent = String(aCount);
   $('mc-count-running').textContent = String(rCount);
+
+  $('mc-app')?.classList.toggle('is-full-width', isUsage);
+  $('mc-filters')?.classList.toggle('hidden', isUsage);
+  const searchInput = $('mc-search');
+  if (searchInput) {
+    searchInput.placeholder = isUsage ? 'Search models & pools...' : 'Search projects & threads...';
+    searchInput.setAttribute('aria-label', isUsage ? 'Search models and quota pools' : 'Search projects and threads');
+  }
 
   document.querySelectorAll('#mc-view-tabs .mc-seg-btn').forEach((btn) => {
     const active = btn.dataset.view === state.view;
@@ -295,6 +354,11 @@ function renderHeader() {
 
 function renderActiveView() {
   const container = $('mc-view');
+  if (state.view === 'usage') {
+    container.innerHTML = renderUsage(state.usage, state);
+    return;
+  }
+
   if (!state.snap) {
     container.innerHTML = '<div class="mc-empty"><p class="mc-empty-sub">Scanning projects, Git worktrees, Swarms, and scheduled jobs…</p></div>';
     return;
@@ -406,7 +470,7 @@ function renderShell() {
 }
 
 function syncBackdrop() {
-  const show = state.pluginsOpen || (state.inspectorOpen && window.innerWidth < 1100);
+  const show = state.pluginsOpen || (state.view !== 'usage' && state.inspectorOpen && window.innerWidth < 1100);
   $('mc-backdrop').classList.toggle('hidden', !show);
 }
 
@@ -655,10 +719,14 @@ function runPaletteItem(item) {
 
 // ---------- Actions & State Transitions ----------
 function setView(view) {
-  state.view = view;
+  state.view = VALID_VIEWS.has(view) ? view : 'overview';
   renderRail();
   renderHeader();
+  syncBackdrop();
   renderActiveView();
+  if (state.view === 'usage' && (!state.usage || Date.now() - state.usageFetchedAt >= USAGE_POLL_MS)) {
+    loadUsage(false);
+  }
 }
 
 function setFilter(filter) {
@@ -673,10 +741,15 @@ function setDemoMode(enabled) {
   state.selectedThreadId = '';
   state.detail = null;
   state.composerDraft = '';
+  state.usage = null;
+  state.usageFetchedAt = 0;
   if (state.settingsOpen) {
     $('mc-settings-popover').innerHTML = renderSettingsPopover(state);
   }
   pollDashboard(true);
+  if (state.view === 'usage') {
+    loadUsage(true);
+  }
 }
 
 function isUnseenDoneThread(threadId) {
@@ -709,6 +782,11 @@ async function markThreadSeen(threadId, opts = {}) {
 
 async function selectThread(threadId, opts = {}) {
   if (!threadId) return;
+  if (state.view === 'usage') {
+    state.view = 'overview';
+    renderRail();
+    renderHeader();
+  }
   const changed = state.selectedThreadId !== threadId;
   state.selectedThreadId = threadId;
   if (changed) {
@@ -879,6 +957,20 @@ document.addEventListener('click', (e) => {
     return;
   }
 
+  const usageFilterBtn = e.target.closest('[data-usage-filter]');
+  if (usageFilterBtn) {
+    state.usageFilter = usageFilterBtn.dataset.usageFilter || 'all';
+    renderActiveView();
+    return;
+  }
+
+  const usageModeBtn = e.target.closest('[data-usage-mode]');
+  if (usageModeBtn) {
+    state.usageMode = usageModeBtn.dataset.usageMode === 'variants' ? 'variants' : 'families';
+    renderActiveView();
+    return;
+  }
+
   const attAction = e.target.closest('[data-attention-action]');
   if (attAction) {
     e.stopPropagation();
@@ -972,6 +1064,7 @@ document.addEventListener('click', (e) => {
     else if (action === 'toggle-settings') toggleSettingsPopover();
     else if (action === 'close-settings') closeSettingsPopover();
     else if (action === 'load-demo') setDemoMode(true);
+    else if (action === 'refresh-usage') loadUsage(true);
     else if (action === 'clear-filters') {
       state.filter = 'all';
       state.search = '';
@@ -1124,6 +1217,11 @@ window.addEventListener('unhandledrejection', (e) => {
 
 try {
   renderRail();
+  renderHeader();
+  if (state.view === 'usage') {
+    renderActiveView();
+    loadUsage(false);
+  }
   pollDashboard(true);
   resetPollTimer();
 } catch (err) {

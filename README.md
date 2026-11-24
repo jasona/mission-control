@@ -45,8 +45,8 @@ Monitor every workspace, triage approvals, live agent questions, and unseen comp
   - Send follow-up instructions or approve/reject actions directly from the docked quick-reply composer (dispatched via `agentapi`).
 
 - **Dedicated Views, Fast Filtering & Command Palette**
-  - Switch between **Overview**, **Board** (4-column Kanban), **Timeline** (chronological feed), and **Graph** (interactive SVG workspace/thread/swarm topology).
-  - Filter instantly by `All`, `Needs Attention`, or `Running`, search across workspaces and threads, jump anywhere with `Ctrl+K` / `Cmd+K`, toggle Live/Demo datasets, or collapse cleanly into a responsive drawer in narrow aux panes.
+  - Switch between **Overview**, **Board** (4-column Kanban), **Timeline** (chronological feed), **Graph** (interactive SVG workspace/thread/swarm topology), and full-width **Usage** (live Antigravity model quota pools for Gemini/Claude/GPT, reset countdowns, and AI credit balances).
+  - Filter instantly by `All`, `Needs Attention`, or `Running`, search across workspaces, threads, and models, jump anywhere with `Ctrl+K` / `Cmd+K`, toggle Live/Demo datasets, or collapse cleanly into a responsive drawer in narrow aux panes.
 
 - **Zero Runtime Dependencies & Aux-Pane Native**
   Pure Node.js ESM backend with zero third-party `npm` dependencies, paired with a self-contained classic IIFE frontend bundle (`public/app.js` compiled via `build_client.mjs`) so Antigravity's authenticated `sidecar_sdk` iframe loads reliably without ES-module CORS preflights and inherits host dark/light CSS variables automatically.
@@ -146,6 +146,7 @@ mission-control/
         │   ├── cron.mjs            # Scheduled cron parser & next-run computation
         │   ├── seen.mjs            # Persistent seen-thread tracking (seen_threads.json)
         │   ├── aggregator.mjs      # Snapshot, triage ranking, graph & ETag builder
+        │   ├── usage.mjs           # Language server GetUserStatus quota pool & credit normalizer
         │   ├── actions.mjs         # Reply, approval & new-thread dispatch via agentapi
         │   └── demo.mjs            # Stateful demo dataset & interactive actions
         ├── public/
@@ -161,10 +162,12 @@ mission-control/
         │       ├── board.js        # 4-column Kanban board view
         │       ├── timeline.js     # Chronological activity feed
         │       ├── graph.js        # Interactive SVG workspace/thread/swarm topology
-        │       └── inspector.js    # Right-hand Thread Peek & Quick-Reply inspector
+        │       ├── inspector.js    # Right-hand Thread Peek & Quick-Reply inspector
+        │       └── usage.js        # Full-width quota pools, credits & model meters view
         └── test/
             ├── aggregator.test.mjs # Unit/integration tests for aggregation, triage & seen store
-            └── server.test.mjs     # HTTP handler & static bundle route tests
+            ├── server.test.mjs     # HTTP handler & static bundle route tests
+            └── usage.test.mjs      # Unit/UI tests for quota pools, credits & PII redaction
 ```
 
 ---
@@ -177,6 +180,7 @@ Both `SidecarApp` (authenticated Antigravity bridge) and standalone mode expose 
 | --- | --- | --- |
 | `GET /api/dashboard` | `?demo=1&etag=...&conversationId=...` | Returns full cross-project telemetry, Needs Attention items, workspaces, threads, graph, and cron schedules (or `unchanged: true` on matching `etag`). |
 | `GET /api/thread` | `?id=<threadId>&demo=...` | Returns detailed thread activity, Swarm board/roster, changed files, and git diff. |
+| `GET /api/usage` | `?demo=1&refresh=1` | Returns normalized Antigravity quota pools, model family/variant percentages, reset countdowns, and credit balances. |
 | `POST /api/reply` | `{ threadId, message, demo }` | Sends a follow-up prompt or answer to a thread via `agentapi` (or demo store). |
 | `POST /api/approve` | `{ threadId, decision, demo }` | Submits an approval/rejection decision for a waiting step. |
 | `POST /api/threads/new` | `{ projectId, title, prompt, model, demo }` | Starts a new conversation in the target workspace. |
