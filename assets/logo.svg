@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" width="128" height="128" role="img" aria-label="Mission Control">
+  <defs>
+    <linearGradient id="mc-bg" x1="12" y1="12" x2="116" y2="116" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#171b24"/>
+      <stop offset="100%" stop-color="#0b0d12"/>
+    </linearGradient>
+  </defs>
+
+  <!-- ~10% outer padding (12px on 128px canvas) for clean framing on light and dark themes -->
+  <rect x="12" y="12" width="104" height="104" rx="22" fill="url(#mc-bg)" stroke="#334155" stroke-width="2.5"/>
+
+  <!-- Top-left tile: Live project & active swarm -->
+  <rect x="25" y="25" width="36" height="36" rx="8" fill="#1e2433" stroke="#2d3748" stroke-width="1.5"/>
+  <circle cx="35" cy="36" r="4.5" fill="#22c55e"/>
+  <rect x="43" y="34" width="12" height="4" rx="2" fill="#f8fafc"/>
+  <rect x="31" y="45" width="24" height="4" rx="2" fill="#cbd5e1"/>
+  <rect x="31" y="52" width="16" height="4" rx="2" fill="#64748b"/>
+
+  <!-- Top-right tile: Needs Attention triage -->
+  <rect x="67" y="25" width="36" height="36" rx="8" fill="#221e19" stroke="#f59e0b" stroke-opacity="0.85" stroke-width="1.5"/>
+  <circle cx="77" cy="36" r="4.5" fill="#f59e0b"/>
+  <rect x="85" y="34" width="12" height="4" rx="2" fill="#f8fafc"/>
+  <rect x="73" y="45" width="24" height="4" rx="2" fill="#fbbf24"/>
+  <rect x="73" y="52" width="18" height="4" rx="2" fill="#e2e8f0"/>
+
+  <!-- Bottom-left tile: Scheduled cron & git matrix -->
+  <rect x="25" y="67" width="36" height="36" rx="8" fill="#1e2433" stroke="#2d3748" stroke-width="1.5"/>
+  <circle cx="35" cy="78" r="4.5" fill="#38bdf8"/>
+  <rect x="43" y="76" width="12" height="4" rx="2" fill="#f8fafc"/>
+  <rect x="31" y="87" width="22" height="4" rx="2" fill="#94a3b8"/>
+  <rect x="31" y="94" width="14" height="4" rx="2" fill="#64748b"/>
+
+  <!-- Bottom-right tile: Live telemetry pulse -->
+  <rect x="67" y="67" width="36" height="36" rx="8" fill="#182625" stroke="#10b981" stroke-opacity="0.5" stroke-width="1.5"/>
+  <path d="M 71 86 L 76.5 86 L 80.5 75.5 L 85.5 95.5 L 89.5 81 L 92.5 86 L 97 86"
+        fill="none"
+        stroke="#34d399"
+        stroke-width="3.2"
+        stroke-linecap="round"
+        stroke-linejoin="round"/>
+  <circle cx="97.5" cy="86" r="2.75" fill="#ffffff"/>
+</svg>

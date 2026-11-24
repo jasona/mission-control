@@ -1,0 +1,13 @@
+{
+  "name": "mission_control",
+  "version": "0.1.0",
+  "license": "MIT",
+  "type": "module",
+  "description": "Cross-project Mission Control dashboard sidecar for Antigravity",
+  "main": "main.mjs",
+  "scripts": {
+    "start": "node main.mjs --standalone --demo",
+    "build": "node build_client.mjs",
+    "test": "node --test test/*.test.mjs"
+  }
+}

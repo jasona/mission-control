@@ -1,0 +1,10 @@
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+*.tmp.*
+.env
+.env.*
+seen_threads.json
+node_modules/
+coverage/
