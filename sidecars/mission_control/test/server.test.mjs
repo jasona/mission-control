@@ -186,7 +186,10 @@ test('standalone demo server serves static assets, preload stub, dashboard etag,
   assert.equal(usageRes.status, 200);
   assert.equal(usageRes.json.mode, 'demo');
   assert.equal(usageRes.json.available, true);
+  assert.equal(usageRes.json.summary.hasWeeklyData, true);
   assert.equal(usageRes.json.pools.length, 3);
+  assert.equal(typeof usageRes.json.pools[0].weekly?.remainingPct, 'number');
+  assert.equal(typeof usageRes.json.pools[0].weekly?.usedPct, 'number');
   assert.ok(usageRes.json.families.length >= 5);
   assert.ok(usageRes.json.models.length >= 20);
   assert.equal(usageRes.json.credits.length, 1);

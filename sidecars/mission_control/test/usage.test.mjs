@@ -185,7 +185,112 @@ test('normalizeUserStatus keeps Gemini separate from Claude & GPT even at identi
   );
 });
 
-test('getUsageSnapshot caches live LS calls, supports force refresh, and falls back gracefully when LS unavailable', async (t) => {
+test('normalizeUserStatus merges RetrieveUserQuotaSummary weekly & 5h limits and reconciles stale 5h reset', () => {
+  const nowMs = Date.UTC(2026, 10, 25, 3, 41, 0);
+  const stale5hReset = new Date(nowMs - 2 * 60 * 60 * 1000).toISOString();
+  const fresh5hReset = new Date(nowMs + 2 * 60 * 60 * 1000).toISOString();
+  const futurePartner5hReset = new Date(nowMs + 4 * 60 * 60 * 1000).toISOString();
+  const geminiWeeklyReset = new Date(nowMs + 5 * 24 * 60 * 60 * 1000).toISOString();
+  const partnerWeeklyReset = new Date(nowMs + 6 * 24 * 60 * 60 * 1000).toISOString();
+
+  const rawStatus = makeSampleRawStatus(nowMs);
+  // Set Gemini in GetUserStatus to fresh future 5h window (75%) and Claude/GPT exhausted weekly via summary
+  for (const m of rawStatus.userStatus.cascadeModelConfigData.clientModelConfigs) {
+    if (m.modelId.startsWith('gemini-') || m.modelId.startsWith('orchestrator')) {
+      m.quotaInfo = { remainingFraction: 0.75, resetTime: fresh5hReset };
+    } else if (m.modelId.startsWith('claude') || m.modelId.startsWith('gpt')) {
+      m.quotaInfo = { remainingFraction: 1, resetTime: futurePartner5hReset };
+    }
+  }
+
+  const snap = normalizeUserStatus(rawStatus, {
+    nowMs,
+    mode: 'live',
+    quotaSummary: {
+      response: {
+        description: 'Models share a 5-hour and weekly limit.',
+        groups: [
+          {
+            displayName: 'Gemini Models',
+            description: 'Models within this group: Gemini 4 Neon, Orchestrator (Neon)',
+            buckets: [
+              {
+                bucketId: 'gemini-weekly',
+                displayName: 'Weekly Limit Remaining',
+                window: 'weekly',
+                remainingFraction: 0.85,
+                resetTime: geminiWeeklyReset,
+              },
+              {
+                bucketId: 'gemini-5h',
+                displayName: 'Five Hour Limit Remaining',
+                window: '5h',
+                remainingFraction: 0.94,
+                resetTime: stale5hReset,
+              },
+            ],
+          },
+          {
+            displayName: 'Claude and GPT models',
+            description: 'Models within this group: Claude Opus 5.5, GPT-OSS 120B',
+            buckets: [
+              {
+                bucketId: '3p-weekly',
+                displayName: 'Weekly Limit Remaining',
+                window: 'weekly',
+                // Proto3 omitted 0.0 remainingFraction with resetTime -> exhausted
+                resetTime: partnerWeeklyReset,
+              },
+              {
+                bucketId: '3p-5h',
+                displayName: 'Five Hour Limit Remaining',
+                window: '5h',
+                remainingFraction: 1,
+                resetTime: futurePartner5hReset,
+              },
+            ],
+          },
+        ],
+      },
+    },
+  });
+
+  assert.equal(snap.summary.hasWeeklyData, true);
+  assert.equal(snap.pools.length, 2);
+
+  // Constrained weekly pool (0% left / 100% used) sorts first and marks pool exhausted even though 5h is 100%
+  const partnerPool = snap.pools.find((p) => p.name === 'Claude and GPT models');
+  assert.equal(partnerPool.fiveHour.remainingPct, 100);
+  assert.equal(partnerPool.weekly.remainingPct, 0);
+  assert.equal(partnerPool.weekly.usedPct, 100);
+  assert.equal(partnerPool.weekly.status, 'exhausted');
+  assert.equal(partnerPool.status, 'exhausted');
+  assert.equal(partnerPool.tone, 'red');
+
+  // Stale 5h resetTime reconciled against fresher GetUserStatus (75% left / 25% used, fresh5hReset)
+  const geminiPool = snap.pools.find((p) => p.name === 'Gemini Models');
+  assert.equal(geminiPool.fiveHour.remainingPct, 75);
+  assert.equal(geminiPool.fiveHour.usedPct, 25);
+  assert.equal(geminiPool.fiveHour.resetTime, fresh5hReset);
+  assert.equal(geminiPool.weekly.remainingPct, 85);
+  assert.equal(geminiPool.weekly.usedPct, 15);
+  assert.equal(geminiPool.weekly.resetTime, geminiWeeklyReset);
+
+  // Models & families inherit weekly metrics
+  const neonFam = snap.families.find((f) => f.id === 'gemini-4-neon');
+  assert.equal(neonFam.weeklyRemainingPct, 85);
+  assert.equal(neonFam.weeklyUsedPct, 15);
+  const gptModel = snap.models.find((m) => m.id === 'gpt-oss-120b-medium');
+  assert.equal(gptModel.weeklyRemainingPct, 0);
+  assert.equal(gptModel.weeklyUsedPct, 100);
+  assert.equal(gptModel.weeklyStatus, 'exhausted');
+
+  assert.equal(snap.summary.lowestWeeklyRemainingPct, 0);
+  assert.equal(snap.summary.lowestWeeklyUsedPct, 100);
+  assert.equal(snap.summary.lowestWeeklyPoolName, 'Claude and GPT models');
+});
+
+test('getUsageSnapshot caches dual live LS calls, supports force refresh, and degrades gracefully if summary RPC fails', async (t) => {
   clearUsageCache();
   t.after(() => clearUsageCache());
 
@@ -195,17 +300,56 @@ test('getUsageSnapshot caches live LS calls, supports force refresh, and falls b
   assert.equal(unconfigured.ok, false);
   assert.equal(unconfigured.code, 'LS_NOT_CONFIGURED');
 
-  // 2. Live HTTP fetch caching & force bypass
+  // 2. Live HTTP fetch caching & force bypass across GetUserStatus + RetrieveUserQuotaSummary
   const origFetch = globalThis.fetch;
-  let callCount = 0;
+  let statusCalls = 0;
+  let summaryCalls = 0;
+  let summaryShouldFail = false;
+
   globalThis.fetch = async (url, init) => {
-    callCount += 1;
-    assert.match(String(url), /\/exa\.language_server_pb\.LanguageServerService\/GetUserStatus$/);
+    const u = String(url);
     assert.equal(init.headers['x-codeium-csrf-token'], 'csrf-test-token');
-    return new Response(JSON.stringify(makeSampleRawStatus()), {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    });
+    if (u.endsWith('/GetUserStatus')) {
+      statusCalls += 1;
+      return new Response(JSON.stringify(makeSampleRawStatus()), {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    if (u.endsWith('/RetrieveUserQuotaSummary')) {
+      summaryCalls += 1;
+      if (summaryShouldFail) {
+        return new Response('Not found', { status: 404 });
+      }
+      return new Response(
+        JSON.stringify({
+          response: {
+            groups: [
+              {
+                displayName: 'Gemini Models',
+                description: 'Models within this group: Gemini 4 Neon, Orchestrator (Neon)',
+                buckets: [
+                  {
+                    bucketId: 'gemini-weekly',
+                    window: 'weekly',
+                    remainingFraction: 0.72,
+                    resetTime: new Date(Date.now() + 4 * 86400_000).toISOString(),
+                  },
+                  {
+                    bucketId: 'gemini-5h',
+                    window: '5h',
+                    remainingFraction: 0.87,
+                    resetTime: new Date(Date.now() + 3600_000).toISOString(),
+                  },
+                ],
+              },
+            ],
+          },
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      );
+    }
+    throw new Error(`Unexpected URL ${u}`);
   };
   t.after(() => {
     globalThis.fetch = origFetch;
@@ -214,14 +358,25 @@ test('getUsageSnapshot caches live LS calls, supports force refresh, and falls b
   const first = await getUsageSnapshot({ lsAddress: '127.0.0.1:9999', csrfToken: 'csrf-test-token' });
   const second = await getUsageSnapshot({ lsAddress: '127.0.0.1:9999', csrfToken: 'csrf-test-token' });
   assert.equal(first.available, true);
+  assert.equal(first.summary.hasWeeklyData, true);
+  assert.equal(first.pools.find((p) => p.name === 'Gemini Models')?.weekly.usedPct, 28);
   assert.equal(second.available, true);
-  assert.equal(callCount, 1);
+  assert.equal(statusCalls, 1);
+  assert.equal(summaryCalls, 1);
 
   const forced = await getUsageSnapshot({ lsAddress: '127.0.0.1:9999', csrfToken: 'csrf-test-token', force: true });
   assert.equal(forced.available, true);
-  assert.equal(callCount, 2);
+  assert.equal(statusCalls, 2);
+  assert.equal(summaryCalls, 2);
 
-  // 3. Failure backoff + LS_UNAVAILABLE
+  // Graceful fallback when RetrieveUserQuotaSummary fails while GetUserStatus succeeds
+  summaryShouldFail = true;
+  const fallbackOnly = await getUsageSnapshot({ lsAddress: '127.0.0.1:9999', csrfToken: 'csrf-test-token', force: true });
+  assert.equal(fallbackOnly.available, true);
+  assert.equal(fallbackOnly.summary.hasWeeklyData, false);
+  assert.ok(fallbackOnly.pools.length >= 1);
+
+  // 3. Total failure backoff + LS_UNAVAILABLE
   globalThis.fetch = async () => {
     throw new Error('ECONNREFUSED');
   };
@@ -231,17 +386,25 @@ test('getUsageSnapshot caches live LS calls, supports force refresh, and falls b
   assert.match(failed.error, /ECONNREFUSED/);
 });
 
-test('renderUsage renders pools, modes, provider/search filters, unavailable state, and escapes XSS', () => {
+test('renderUsage renders 5-hour + weekly limit meters, modes, filters, unavailable state, and escapes XSS', () => {
   const demo = getDemoUsageSnapshot();
   assert.equal(demo.pools.length, 3);
   assert.equal(demo.pools[0].name, 'Claude Pool');
   assert.equal(demo.pools[0].remainingPct, 28);
+  assert.equal(demo.pools[0].weekly.remainingPct, 42);
+  assert.equal(demo.pools[0].weekly.usedPct, 58);
   assert.equal(demo.pools[0].tone, 'amber');
+  assert.equal(demo.summary.hasWeeklyData, true);
 
   const familiesHtml = renderUsage(demo, { usageFilter: 'all', usageMode: 'families', search: '' });
   assert.match(familiesHtml, /Claude Pool/);
   assert.match(familiesHtml, /Gemini Pool/);
   assert.match(familiesHtml, /GPT Pool/);
+  assert.match(familiesHtml, /5-Hour Limit/);
+  assert.match(familiesHtml, /Weekly Limit/);
+  assert.match(familiesHtml, /58% used/);
+  assert.match(familiesHtml, /22% used/);
+  assert.match(familiesHtml, /Wk 22% used/);
   assert.match(familiesHtml, /28%/);
   assert.match(familiesHtml, /64%/);
   assert.match(familiesHtml, /100%/);
@@ -251,7 +414,18 @@ test('renderUsage renders pools, modes, provider/search filters, unavailable sta
 
   const variantsHtml = renderUsage(demo, { usageFilter: 'claude', usageMode: 'variants', search: 'opus' });
   assert.match(variantsHtml, /Claude Opus 5\.5 \(High\)/);
+  assert.match(variantsHtml, /Wk 58% used/);
   assert.equal(variantsHtml.includes('Gemini 4 Neon'), false);
+
+  // Escapes quotaDescription & pool names
+  const xssSnap = {
+    ...demo,
+    quotaDescription: '<img src=x onerror=alert(1)> weekly policy',
+    pools: demo.pools.map((p, i) => (i === 0 ? { ...p, name: '<script>alert(2)</script>' } : p)),
+  };
+  const xssHtml = renderUsage(xssSnap, {});
+  assert.equal(xssHtml.includes('<img src=x onerror=alert(1)>'), false);
+  assert.equal(xssHtml.includes('<script>alert(2)</script>'), false);
 
   // Unavailable + XSS escape test
   const unavailHtml = renderUsage(

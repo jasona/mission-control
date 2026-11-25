@@ -50,7 +50,47 @@ function normalizePathSafe(p) {
   }
 }
 
+function decodeFileUri(uri) {
+  if (typeof uri !== 'string' || !uri.startsWith('file://')) return '';
+  try {
+    return decodeURIComponent(new URL(uri).pathname);
+  } catch {
+    try {
+      return decodeURIComponent(uri.slice(7));
+    } catch {
+      return '';
+    }
+  }
+}
+
+function isGlobalPluginOrBuiltinPath(rawPath) {
+  const s = String(rawPath || '').replace(/\\/g, '/');
+  return (
+    s.includes('/.gemini/config/plugins/') ||
+    s.endsWith('/.gemini/config/plugins') ||
+    s.includes('/.gemini/antigravity/builtin/') ||
+    s.endsWith('/.gemini/antigravity/builtin')
+  );
+}
+
+function bestProjectForPath(rawCand, projectEntries) {
+  const cand = normalizePathSafe(rawCand);
+  if (!cand) return null;
+  let best = null;
+  for (const proj of projectEntries) {
+    for (const projPath of proj.canonicalPaths) {
+      if (!projPath) continue;
+      const match = cand === projPath || cand.startsWith(projPath.endsWith(sep) ? projPath : projPath + sep);
+      if (match && (!best || projPath.length > best.len)) {
+        best = { id: proj.id, len: projPath.length };
+      }
+    }
+  }
+  return best;
+}
+
 function matchConversationToProject(conv, tr, swarm, agentMeta, projectEntries, activeConvId) {
+  // Tier 1: Explicit project ID from agentapi or local metadata.
   const explicitProjectId = agentMeta?.projectId || conv.localMeta?.projectId ||
     (conv.id === activeConvId ? process.env.ANTIGRAVITY_PROJECT_ID : '');
   if (explicitProjectId) {
@@ -58,39 +98,50 @@ function matchConversationToProject(conv, tr, swarm, agentMeta, projectEntries, 
     if (byId) return byId.id;
   }
 
-  const candidatePaths = [
+  // Tier 2: Authoritative declared workspace paths.
+  const authoritativePaths = [
     ...(conv.localMeta?.workspacePaths || []),
     ...(swarm?.workspaces || []),
-    ...(tr?.referencedPaths || []),
   ];
-
   if (agentMeta?.workspaceUris?.length) {
     for (const u of agentMeta.workspaceUris) {
-      if (typeof u === 'string' && u.startsWith('file://')) {
-        try {
-          candidatePaths.push(decodeURIComponent(u.slice(7)));
-        } catch {
-          // Ignore malformed URI.
-        }
-      }
+      const p = decodeFileUri(u);
+      if (p) authoritativePaths.push(p);
     }
   }
 
-  let best = null;
-  for (const rawCand of candidatePaths) {
-    const cand = normalizePathSafe(rawCand);
-    if (!cand) continue;
-    for (const proj of projectEntries) {
-      for (const projPath of proj.canonicalPaths) {
-        if (!projPath) continue;
-        const match = cand === projPath || cand.startsWith(projPath.endsWith(sep) ? projPath : projPath + sep);
-        if (match && (!best || projPath.length > best.len)) {
-          best = { id: proj.id, len: projPath.length };
-        }
-      }
+  let bestAuth = null;
+  for (const rawCand of authoritativePaths) {
+    const hit = bestProjectForPath(rawCand, projectEntries);
+    if (hit && (!bestAuth || hit.len > bestAuth.len)) {
+      bestAuth = hit;
     }
   }
-  return best ? best.id : null;
+  if (bestAuth) return bestAuth.id;
+
+  // Tier 3: Count-weighted fallback over transcript referencedPaths, ignoring symlinked plugin/builtin paths.
+  const counts = new Map();
+  const maxLenByProj = new Map();
+  for (const rawCand of tr?.referencedPaths || []) {
+    if (isGlobalPluginOrBuiltinPath(rawCand)) continue;
+    const hit = bestProjectForPath(rawCand, projectEntries);
+    if (!hit) continue;
+    counts.set(hit.id, (counts.get(hit.id) || 0) + 1);
+    maxLenByProj.set(hit.id, Math.max(maxLenByProj.get(hit.id) || 0, hit.len));
+  }
+
+  let bestId = null;
+  let bestCount = 0;
+  let bestLen = 0;
+  for (const [id, count] of counts.entries()) {
+    const len = maxLenByProj.get(id) || 0;
+    if (count > bestCount || (count === bestCount && len > bestLen)) {
+      bestId = id;
+      bestCount = count;
+      bestLen = len;
+    }
+  }
+  return bestId;
 }
 
 function buildLiveThreadRecord(conv, project, trEntry, swarm, agentMeta, now, seenMap = {}) {
@@ -490,13 +541,23 @@ async function assembleLiveState(options = {}) {
 
   const topLevelConvs = convs.filter((c) => !workerConvIds.has(c.id));
   const useAgentApi = options.useAgentApi !== false;
+  const loadAgentMeta = typeof options.getConversationMetadata === 'function'
+    ? options.getConversationMetadata
+    : getConversationMetadata;
 
   const convPrepared = await Promise.all(topLevelConvs.map(async (conv) => {
     const trEntry = conv.hasTranscript ? summarizeTranscript(conv.transcriptPath) : { key: '-', summary: null };
     const swarm = swarmsByConvId.get(conv.id) || null;
-    const agentMeta = useAgentApi ? await getConversationMetadata(conv.id) : null;
+    const agentMeta = useAgentApi ? await loadAgentMeta(conv.id) : null;
     return { conv, trEntry, swarm, agentMeta };
   }));
+
+  const visibleConvs = convPrepared.filter(({ conv, agentMeta }) => {
+    if (!agentMeta) return true;
+    if (agentMeta.isSubagent) return false;
+    if (agentMeta.parentConversationId && agentMeta.parentConversationId !== conv.id) return false;
+    return true;
+  });
 
   let unassignedProject = null;
   const ensureUnassigned = () => {
@@ -518,7 +579,7 @@ async function assembleLiveState(options = {}) {
 
   const activeConvId = options.conversationId || process.env.ANTIGRAVITY_CONVERSATION_ID || '';
   if (activeConvId) {
-    const activeConv = convPrepared.find((entry) => entry.conv.id === activeConvId);
+    const activeConv = visibleConvs.find((entry) => entry.conv.id === activeConvId);
     if (activeConv) {
       const activeUpdatedAt = activeConv.trEntry?.summary?.updatedAtMs || activeConv.conv.mtime || now;
       markThreadSeen(activeConv.conv.id, Math.max(now, activeUpdatedAt), options);
@@ -530,7 +591,7 @@ async function assembleLiveState(options = {}) {
   const recordsById = new Map();
   const needsAttention = [];
 
-  for (const { conv, trEntry, swarm, agentMeta } of convPrepared) {
+  for (const { conv, trEntry, swarm, agentMeta } of visibleConvs) {
     const matchedId = matchConversationToProject(conv, trEntry.summary, swarm, agentMeta, projectEntries, activeConvId);
     const project = matchedId
       ? projectEntries.find((p) => p.id === matchedId)
