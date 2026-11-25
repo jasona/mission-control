@@ -1392,6 +1392,12 @@
       { id: 'low', label: 'Low Quota' },
     ];
 
+    const LOW_STATUSES = new Set(['low', 'critical', 'exhausted']);
+
+    function isItemLowQuota(item) {
+      return LOW_STATUSES.has(item?.status) || LOW_STATUSES.has(item?.weeklyStatus);
+    }
+
     function formatNumber(n) {
       const num = Number(n);
       if (!Number.isFinite(num)) return '0';
@@ -1400,7 +1406,7 @@
 
     function matchesUsageItem(item, filter, query) {
       if (filter === 'low') {
-        if (!['low', 'critical', 'exhausted'].includes(item.status)) return false;
+        if (!isItemLowQuota(item)) return false;
       } else if (filter !== 'all') {
         if (item.provider !== filter) return false;
       }
@@ -1419,17 +1425,47 @@
       return hay.includes(query);
     }
 
+    function formatWindowReset(winBucket, nowMs) {
+      const cd = formatCountdown(winBucket?.resetTime || winBucket?.resetMs, nowMs);
+      const clk = formatResetClock(winBucket?.resetTime || winBucket?.resetMs, nowMs);
+      if (!cd) return 'No active reset window';
+      return cd === 'Resetting' ? 'Resetting soon' : `Resets ${cd}${clk ? ` · ${clk}` : ''}`;
+    }
+
+    function renderWindowBlock(winBucket, poolName, nowMs) {
+      const wTone = safeTone(winBucket.tone, 'muted');
+      const hasPct = typeof winBucket.remainingPct === 'number';
+      const pct = hasPct ? Math.min(100, Math.max(0, winBucket.remainingPct)) : null;
+      const widthPct = pct === null ? 0 : pct;
+      const isWeekly = winBucket.window === 'weekly';
+      const winLabel = winBucket.label || (isWeekly ? 'Weekly Limit' : '5-Hour Limit');
+      const resetText = formatWindowReset(winBucket, nowMs);
+
+      return `
+        <div class="mc-window-block${isWeekly ? ' is-weekly' : ''}">
+          <div class="mc-window-head">
+            <span class="mc-window-label">${esc(winLabel)}</span>
+            <div class="mc-pool-reset">${icon('clock')}<span>${esc(resetText)}</span></div>
+          </div>
+          <div class="mc-window-metrics">
+            <span class="mc-window-pct">${pct === null ? '—' : `${pct}%`}</span>
+            <span class="mc-pool-pct-label">remaining</span>
+            ${typeof winBucket.usedPct === 'number' ? `<span class="mc-window-used">${winBucket.usedPct}% used</span>` : ''}
+          </div>
+          <div class="mc-meter-track" role="progressbar" aria-label="${esc(poolName)} ${esc(winLabel)} remaining quota" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct === null ? 0 : pct}">
+            <div class="mc-meter-fill tone-${esc(wTone)}" style="width: ${widthPct}%;"></div>
+          </div>
+        </div>
+      `;
+    }
+
     function renderPoolCard(pool, nowMs) {
       const tone = safeTone(pool.tone, 'muted');
       const hasPct = typeof pool.remainingPct === 'number';
       const pct = hasPct ? Math.min(100, Math.max(0, pool.remainingPct)) : null;
       const widthPct = pct === null ? 0 : pct;
       const statusLabel = STATUS_LABELS[pool.status] || 'Unknown';
-      const cd = formatCountdown(pool.resetTime || pool.resetMs, nowMs);
-      const clk = formatResetClock(pool.resetTime || pool.resetMs, nowMs);
-      const resetText = cd
-        ? (cd === 'Resetting' ? 'Resetting shortly' : `Resets in ${cd}${clk ? ` · ${clk}` : ''}`)
-        : 'No active reset window';
+      const resetText = formatWindowReset(pool, nowMs);
 
       const providersHtml = (pool.providerLabels || [])
         .map((p) => `<span class="mc-code-pill">${esc(p)}</span>`)
@@ -1439,16 +1475,10 @@
         .map((name) => `<span class="mc-pool-family-chip">${esc(name)}</span>`)
         .join('');
 
-      return `
-        <article class="mc-pool-card tone-${esc(tone)}" data-pool-id="${esc(pool.id)}">
-          <div class="mc-pool-head">
-            <div class="mc-pool-title-wrap">
-              <h3 class="mc-pool-name">${esc(pool.name || 'Quota Pool')}</h3>
-              <div class="mc-pool-providers">${providersHtml}</div>
-            </div>
-            <span class="mc-status-badge tone-${esc(tone)}">${dotHtml(tone)} ${esc(statusLabel)}</span>
-          </div>
-
+      const windows = [pool.fiveHour, pool.weekly].filter(Boolean);
+      const metersHtml = pool.weekly && windows.length > 0
+        ? `<div class="mc-pool-windows">${windows.map((w) => renderWindowBlock(w, pool.name || 'Quota pool', nowMs)).join('')}</div>`
+        : `
           <div class="mc-pool-metrics">
             <div class="mc-pool-pct-group">
               <span class="mc-pool-pct">${pct === null ? '—' : `${pct}%`}</span>
@@ -1461,6 +1491,19 @@
           <div class="mc-meter-track" role="progressbar" aria-label="${esc(pool.name || 'Quota pool')} remaining quota" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${pct === null ? 0 : pct}">
             <div class="mc-meter-fill tone-${esc(tone)}" style="width: ${widthPct}%;"></div>
           </div>
+        `;
+
+      return `
+        <article class="mc-pool-card tone-${esc(tone)}" data-pool-id="${esc(pool.id)}">
+          <div class="mc-pool-head">
+            <div class="mc-pool-title-wrap">
+              <h3 class="mc-pool-name">${esc(pool.name || 'Quota Pool')}</h3>
+              <div class="mc-pool-providers">${providersHtml}</div>
+            </div>
+            <span class="mc-status-badge tone-${esc(tone)}">${dotHtml(tone)} ${esc(statusLabel)}</span>
+          </div>
+
+          ${metersHtml}
 
           ${familiesHtml ? `<div class="mc-pool-families">${familiesHtml}</div>` : ''}
         </article>
@@ -1528,6 +1571,15 @@
         ? item.thinkingLevels.map((lvl) => `<span class="mc-thinking-pill">${esc(lvl)}</span>`).join('')
         : `<span class="mc-code-pill">${esc(item.id)}</span>`;
 
+      const weeklyResetCd = item.weeklyResetTime || item.weeklyResetMs
+        ? formatCountdown(item.weeklyResetTime || item.weeklyResetMs, nowMs)
+        : '';
+      const hasWeekly = item.weeklyUsedPct !== null && item.weeklyUsedPct !== undefined;
+      const weeklyTone = safeTone(item.weeklyTone, 'muted');
+      const weeklyTitle = hasWeekly
+        ? `${item.weeklyRemainingPct}% remaining (${item.weeklyUsedPct}% used)${weeklyResetCd ? ` · resets in ${weeklyResetCd}` : ''}`
+        : '';
+
       return `
         <div class="mc-model-meter-row">
           <div class="mc-model-meter-main">
@@ -1550,6 +1602,7 @@
             </div>
             <span class="mc-model-pct tone-${esc(tone)}">${pct === null ? '—' : `${pct}%`}</span>
             <span class="mc-model-reset">${esc(cd || '—')}</span>
+            ${hasWeekly ? `<span class="mc-model-weekly tone-${esc(weeklyTone)}" title="${esc(weeklyTitle)}">Wk ${item.weeklyUsedPct}% used</span>` : ''}
           </div>
         </div>
       `;
@@ -1616,13 +1669,18 @@
         gemini: sourceItems.filter((i) => i.provider === 'gemini').length,
         claude: sourceItems.filter((i) => i.provider === 'claude').length,
         gpt: sourceItems.filter((i) => i.provider === 'gpt').length,
-        low: sourceItems.filter((i) => ['low', 'critical', 'exhausted'].includes(i.status)).length,
+        low: sourceItems.filter((i) => isItemLowQuota(i)).length,
       };
+
+      const weeklySummaryText = summary.hasWeeklyData && typeof summary.lowestWeeklyRemainingPct === 'number'
+        ? `Weekly: ${summary.lowestWeeklyRemainingPct}% left (${summary.lowestWeeklyUsedPct}% used)`
+        : '';
 
       const heroStats = [
         `${summary.poolCount ?? pools.length} ${(summary.poolCount ?? pools.length) === 1 ? 'Shared Pool' : 'Shared Pools'}`,
         `${summary.familyCount ?? families.length} Model ${(summary.familyCount ?? families.length) === 1 ? 'Family' : 'Families'}`,
-        nextResetCd ? `Next reset ${nextResetCd === 'Resetting' ? 'soon' : `in ${nextResetCd}`}` : '',
+        weeklySummaryText,
+        nextResetCd ? `Next 5h reset ${nextResetCd === 'Resetting' ? 'soon' : `in ${nextResetCd}`}` : '',
       ].filter(Boolean).join(' · ');
 
       const poolsHtml = filteredPools.length
@@ -1656,6 +1714,7 @@
               ${summary.lowPoolCount > 0 ? `<span class="mc-section-count tone-amber">${summary.lowPoolCount} low quota</span>` : ''}
             </div>
             <div class="mc-usage-pools-grid">${poolsHtml}</div>
+            ${usage.quotaDescription ? `<p class="mc-usage-note">${esc(usage.quotaDescription)}</p>` : ''}
           </section>
 
           ${renderCreditsStrip(usage)}

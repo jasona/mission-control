@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
 import { pathToFileURL } from 'node:url';
 
+import { parseConversationMetadata } from '../lib/actions.mjs';
 import { buildDashboardSnapshot, getThreadDetail } from '../lib/aggregator.mjs';
 import { computeNextRun, discoverCrons, parseCronSpec } from '../lib/cron.mjs';
 import {
@@ -829,4 +830,146 @@ test('question triage ignores completed conversational replies and surfaces genu
   assert.equal(qActivity.body, 'Which release branch should we tag?');
   assert.equal(qActivity.badge.tone, 'amber');
   assert.equal(qActivity.stateText, 'Waiting for reply');
+});
+
+test('parseConversationMetadata & project matching unwrap agentapi metadata, ignore symlinked plugins, and hide subagents', async (t) => {
+  const root = mkdtempSync(join(tmpdir(), 'mc-proj-route-'));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+
+  const homeDir = join(root, 'home');
+  const configDir = join(homeDir, '.gemini', 'config');
+  const projectsDir = join(configDir, 'projects');
+  const pluginsDir = join(configDir, 'plugins');
+  const appDataDir = join(homeDir, '.gemini', 'antigravity');
+  const brainDir = join(appDataDir, 'brain');
+
+  // Deliberately make mission-control repo path longer than crowbaros path.
+  const crowbarDir = join(root, 'coding', 'crowbaros');
+  const mcRepoDir = join(root, 'coding', 'mission-control-plugin-repo');
+
+  for (const d of [projectsDir, pluginsDir, brainDir, crowbarDir, mcRepoDir]) {
+    mkdirSync(d, { recursive: true });
+  }
+  // Global plugin symlink pointing to the longer-named plugin repo.
+  symlinkSync(mcRepoDir, join(pluginsDir, 'mission-control'));
+
+  const projCrowbarId = 'ee81dc3e-2b8b-4b34-a750-097d5c67175b';
+  const projMcId = '95a00b3a-f35c-41ef-b232-1cf7601c330e';
+
+  writeFileSync(
+    join(projectsDir, 'crowbaros.json'),
+    JSON.stringify({
+      id: projCrowbarId,
+      name: 'crowbaros',
+      projectResources: { resources: [{ gitFolder: { folderUri: pathToFileURL(crowbarDir).href } }] },
+    }),
+  );
+  writeFileSync(
+    join(projectsDir, 'mission-control.json'),
+    JSON.stringify({
+      id: projMcId,
+      name: 'mission-control',
+      projectResources: { resources: [{ gitFolder: { folderUri: pathToFileURL(mcRepoDir).href } }] },
+    }),
+  );
+
+  // Verify real agentapi nested envelope unwrapping.
+  const convCrowbar = '7a151314-2099-453d-bc6b-6ae832c1212d';
+  const convSubagent = 'd67d19a9-3aeb-4e5c-af3f-f96cddc16ab1';
+
+  const parsedTop = parseConversationMetadata({
+    response: {
+      conversationMetadata: {
+        metadata: {
+          projectId: projCrowbarId,
+          parentConversationId: '',
+          rootConversationId: convCrowbar,
+          nestingDepth: 0,
+          workspaceUris: [pathToFileURL(crowbarDir).href],
+          workspaces: [{ workspaceFolderAbsoluteUri: pathToFileURL(crowbarDir).href }],
+          subagentSpec: null,
+        },
+      },
+    },
+  });
+  assert.equal(parsedTop.projectId, projCrowbarId);
+  assert.deepEqual(parsedTop.workspaceUris, [pathToFileURL(crowbarDir).href]);
+  assert.equal(parsedTop.isSubagent, false);
+
+  const parsedSub = parseConversationMetadata({
+    response: {
+      conversationMetadata: {
+        metadata: {
+          projectId: projMcId,
+          parentConversationId: convCrowbar,
+          rootConversationId: convCrowbar,
+          nestingDepth: 1,
+          subagentSpec: { typeName: 'browser', role: 'Visual QA' },
+        },
+      },
+    },
+  });
+  assert.equal(parsedSub.parentConversationId, convCrowbar);
+  assert.equal(parsedSub.isSubagent, true);
+
+  // Write transcript for convCrowbar that reads files in crowbarDir AND via the symlinked plugin.
+  mkdirSync(join(brainDir, convCrowbar, '.system_generated', 'logs'), { recursive: true });
+  writeFileSync(
+    join(brainDir, convCrowbar, '.system_generated', 'logs', 'transcript.jsonl'),
+    [
+      JSON.stringify({ step_index: 0, type: 'USER_INPUT', content: 'Theme studio work' }),
+      JSON.stringify({
+        step_index: 1,
+        type: 'PLANNER_RESPONSE',
+        status: 'RUNNING',
+        tool_calls: [
+          { name: 'read_file', args: { Path: `"${join(pluginsDir, 'mission-control', 'SKILL.md')}"` } },
+          { name: 'read_file', args: { Path: `"${join(crowbarDir, 'README.md')}"` } },
+          { name: 'read_file', args: { Path: `"${join(crowbarDir, 'theme.rs')}"` } },
+        ],
+      }),
+    ].join('\n') + '\n',
+  );
+
+  // Also add an isolated child subagent transcript that would otherwise land in General or a project.
+  mkdirSync(join(brainDir, convSubagent, '.system_generated', 'logs'), { recursive: true });
+  writeFileSync(
+    join(brainDir, convSubagent, '.system_generated', 'logs', 'transcript.jsonl'),
+    [JSON.stringify({ step_index: 0, type: 'USER_INPUT', content: 'Subagent task' })].join('\n') + '\n',
+  );
+
+  const baseOpts = {
+    homeDir,
+    configDir,
+    projectsDir,
+    appDataDirs: [appDataDir],
+    pluginsDir: [pluginsDir],
+    sidecarDirs: [join(configDir, 'sidecars')],
+    seenStorePath: join(root, 'seen.json'),
+    includePr: false,
+    gitCacheTtlMs: 0,
+  };
+
+  // 1) With agentapi metadata: routes convCrowbar -> crowbaros and excludes child subagent.
+  const snapWithMeta = await buildDashboardSnapshot({
+    ...baseOpts,
+    useAgentApi: true,
+    getConversationMetadata: async (id) => (id === convCrowbar ? parsedTop : parsedSub),
+  });
+  const crowbarProj = snapWithMeta.projects.find((p) => p.id === projCrowbarId);
+  const mcProj = snapWithMeta.projects.find((p) => p.id === projMcId);
+  assert.equal(crowbarProj.threads.length, 1);
+  assert.equal(crowbarProj.threads[0].id, convCrowbar);
+  assert.equal(mcProj.threads.length, 0);
+  assert.equal(snapWithMeta.projects.find((p) => p.id === 'unassigned'), undefined);
+
+  // 2) Even with useAgentApi: false, fallback ignores /.gemini/config/plugins/ symlink & picks crowbaros by count.
+  const snapFallback = await buildDashboardSnapshot({
+    ...baseOpts,
+    useAgentApi: false,
+  });
+  const crowbarFallback = snapFallback.projects.find((p) => p.id === projCrowbarId);
+  const mcFallback = snapFallback.projects.find((p) => p.id === projMcId);
+  assert.equal(crowbarFallback.threads.some((th) => th.id === convCrowbar), true);
+  assert.equal(mcFallback.threads.length, 0);
 });

@@ -45,7 +45,7 @@ Monitor every workspace, triage approvals, live agent questions, and unseen comp
   - Send follow-up instructions or approve/reject actions directly from the docked quick-reply composer (dispatched via `agentapi`).
 
 - **Dedicated Views, Fast Filtering & Command Palette**
-  - Switch between **Overview**, **Board** (4-column Kanban), **Timeline** (chronological feed), **Graph** (interactive SVG workspace/thread/swarm topology), and full-width **Usage** (live Antigravity model quota pools for Gemini/Claude/GPT, reset countdowns, and AI credit balances).
+  - Switch between **Overview**, **Board** (4-column Kanban), **Timeline** (chronological feed), **Graph** (interactive SVG workspace/thread/swarm topology), and full-width **Usage** (live Antigravity 5-hour & weekly quota pools for Gemini/Claude/GPT, reset countdowns, and AI credit balances).
   - Filter instantly by `All`, `Needs Attention`, or `Running`, search across workspaces, threads, and models, jump anywhere with `Ctrl+K` / `Cmd+K`, toggle Live/Demo datasets, or collapse cleanly into a responsive drawer in narrow aux panes.
 
 - **Zero Runtime Dependencies & Aux-Pane Native**
@@ -146,7 +146,7 @@ mission-control/
         │   ├── cron.mjs            # Scheduled cron parser & next-run computation
         │   ├── seen.mjs            # Persistent seen-thread tracking (seen_threads.json)
         │   ├── aggregator.mjs      # Snapshot, triage ranking, graph & ETag builder
-        │   ├── usage.mjs           # Language server GetUserStatus quota pool & credit normalizer
+        │   ├── usage.mjs           # Language server GetUserStatus + RetrieveUserQuotaSummary normalizer
         │   ├── actions.mjs         # Reply, approval & new-thread dispatch via agentapi
         │   └── demo.mjs            # Stateful demo dataset & interactive actions
         ├── public/
@@ -180,7 +180,7 @@ Both `SidecarApp` (authenticated Antigravity bridge) and standalone mode expose 
 | --- | --- | --- |
 | `GET /api/dashboard` | `?demo=1&etag=...&conversationId=...` | Returns full cross-project telemetry, Needs Attention items, workspaces, threads, graph, and cron schedules (or `unchanged: true` on matching `etag`). |
 | `GET /api/thread` | `?id=<threadId>&demo=...` | Returns detailed thread activity, Swarm board/roster, changed files, and git diff. |
-| `GET /api/usage` | `?demo=1&refresh=1` | Returns normalized Antigravity quota pools, model family/variant percentages, reset countdowns, and credit balances. |
+| `GET /api/usage` | `?demo=1&refresh=1` | Returns normalized Antigravity 5-hour & weekly quota pools, model family/variant percentages, reset countdowns, and credit balances. |
 | `POST /api/reply` | `{ threadId, message, demo }` | Sends a follow-up prompt or answer to a thread via `agentapi` (or demo store). |
 | `POST /api/approve` | `{ threadId, decision, demo }` | Submits an approval/rejection decision for a waiting step. |
 | `POST /api/threads/new` | `{ projectId, title, prompt, model, demo }` | Starts a new conversation in the target workspace. |

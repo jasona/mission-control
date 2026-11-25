@@ -90,10 +90,105 @@ function orderModelConfigs(configs, sorts) {
     .map((entry) => entry.cfg);
 }
 
+const PROVIDER_LABEL_MAP = {
+  gemini: 'Gemini',
+  claude: 'Claude',
+  gpt: 'GPT',
+  other: 'Other',
+};
+
+function classifyWindow(bucket) {
+  const hay = `${bucket?.window || ''} ${bucket?.bucketId || ''} ${bucket?.displayName || ''}`;
+  if (/week/i.test(hay)) return 'weekly';
+  if (/5h|five.?hour|hour|short/i.test(hay)) return '5h';
+  return slugify(bucket?.window || bucket?.bucketId || 'quota');
+}
+
+function normalizeQuotaBucket(rawBucket) {
+  const win = classifyWindow(rawBucket);
+  const desc = String(rawBucket?.description || '').trim();
+  const resetTime = typeof rawBucket?.resetTime === 'string' ? rawBucket.resetTime : '';
+  const parsedResetMs = resetTime ? Date.parse(resetTime) : 0;
+  const resetMs = Number.isFinite(parsedResetMs) && parsedResetMs > 0 ? parsedResetMs : 0;
+
+  let remainingFraction = null;
+  if (typeof rawBucket?.remainingFraction === 'number' && Number.isFinite(rawBucket.remainingFraction)) {
+    remainingFraction = Math.min(1, Math.max(0, rawBucket.remainingFraction));
+  } else if (resetTime || /exhausted|used all|0%/i.test(desc)) {
+    remainingFraction = 0;
+  }
+
+  const q = classifyQuota(remainingFraction);
+  const defaultLabel = win === 'weekly' ? 'Weekly Limit' : (win === '5h' ? '5-Hour Limit' : String(rawBucket?.displayName || 'Quota Limit'));
+  return {
+    id: String(rawBucket?.bucketId || slugify(defaultLabel)),
+    window: win,
+    label: defaultLabel,
+    displayName: String(rawBucket?.displayName || defaultLabel),
+    description: desc,
+    remainingFraction,
+    remainingPct: q.remainingPct,
+    usedPct: q.usedPct,
+    resetTime,
+    resetMs,
+    status: q.status,
+    tone: q.tone,
+  };
+}
+
+function parseGroupDescriptionModels(desc) {
+  const cleaned = String(desc || '')
+    .replace(/^models within this group:\s*/i, '')
+    .trim();
+  if (!cleaned) return [];
+  return cleaned
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+function inferGroupProviders(group, buckets) {
+  const hay = `${group?.displayName || ''} ${group?.description || ''} ${buckets.map((b) => b.id).join(' ')}`;
+  const providers = [];
+  if (/gemini|orchestrator/i.test(hay)) providers.push('gemini');
+  if (/claude/i.test(hay)) providers.push('claude');
+  if (/\bgpt\b|gpt-|openai/i.test(hay)) providers.push('gpt');
+  if (providers.length === 0 && /\b3p\b/i.test(hay)) {
+    providers.push('claude', 'gpt');
+  }
+  return providers;
+}
+
+function nameMatchesGroupList(name, mentionedLower) {
+  const target = String(name || '').trim().toLowerCase();
+  if (!target || !mentionedLower.length) return false;
+  return mentionedLower.some(
+    (m) => m === target || target.startsWith(`${m} `) || target.startsWith(`${m} (`) || m.startsWith(`${target} `),
+  );
+}
+
+function mostConstrainedBucket(buckets) {
+  const valid = buckets.filter((b) => b && b.remainingFraction !== null);
+  if (!valid.length) return buckets[0] || null;
+  return [...valid].sort((a, b) => a.remainingFraction - b.remainingFraction)[0];
+}
+
+function attachWeeklyFields(target, weekly) {
+  return {
+    ...target,
+    weeklyRemainingPct: weekly ? weekly.remainingPct : null,
+    weeklyUsedPct: weekly ? weekly.usedPct : null,
+    weeklyResetTime: weekly ? weekly.resetTime : '',
+    weeklyResetMs: weekly ? weekly.resetMs : 0,
+    weeklyStatus: weekly ? weekly.status : 'unknown',
+    weeklyTone: weekly ? weekly.tone : 'muted',
+  };
+}
+
 /**
- * Normalizes an Antigravity GetUserStatus payload into UI-safe quota meters (without PII).
+ * Normalizes Antigravity GetUserStatus (+ optional RetrieveUserQuotaSummary) into UI-safe quota meters (without PII).
  */
-export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live' } = {}) {
+export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live', quotaSummary = null } = {}) {
   const userStatus = raw?.userStatus && typeof raw.userStatus === 'object'
     ? raw.userStatus
     : (raw && typeof raw === 'object' ? raw : {});
@@ -132,7 +227,7 @@ export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live' } =
   const defaultPlaceholder = String(modelData.defaultOverrideModelConfig?.modelOrAlias?.model || '');
   const orderedConfigs = orderModelConfigs(modelData.clientModelConfigs, modelData.clientModelSorts);
 
-  const models = orderedConfigs.map((cfg) => {
+  let models = orderedConfigs.map((cfg) => {
     const label = String(cfg?.label || cfg?.modelId || cfg?.modelOrAlias?.model || 'Unknown Model');
     const id = String(cfg?.modelId || cfg?.modelOrAlias?.model || slugify(label));
     const { provider, providerLabel } = detectProvider(id, label);
@@ -152,7 +247,7 @@ export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live' } =
     }
 
     const q = classifyQuota(remainingFraction);
-    return {
+    return attachWeeklyFields({
       id,
       label,
       provider,
@@ -167,22 +262,9 @@ export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live' } =
       tagTitle: String(cfg?.tagTitle || ''),
       tagDescription: String(cfg?.tagDescription || ''),
       isDefault: Boolean(defaultPlaceholder && cfg?.modelOrAlias?.model === defaultPlaceholder),
-    };
+      poolId: '',
+    }, null);
   });
-
-  // Group model variants by quota pool bucket first, keeping model->pool map.
-  const bucketMap = new Map();
-  const modelToPoolKey = new Map();
-  for (const m of models) {
-    const poolGroup = m.provider === 'gemini' ? 'gemini' : 'partner';
-    const fracKey = m.remainingFraction === null ? 'unknown' : m.remainingFraction.toFixed(3);
-    const key = `${poolGroup}::${m.resetTime || 'none'}::${fracKey}`;
-    if (!bucketMap.has(key)) {
-      bucketMap.set(key, { key, poolGroup, models: [] });
-    }
-    bucketMap.get(key).models.push(m);
-    modelToPoolKey.set(m.id, key);
-  }
 
   // Collapse thinking-level variants using groupedModels when defined.
   const groupedModels = modelData.groupedModels && typeof modelData.groupedModels === 'object'
@@ -233,7 +315,7 @@ export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live' } =
     }
   }
 
-  const families = familyEntries.map((entry) => {
+  let families = familyEntries.map((entry) => {
     const fracs = entry.models.map((v) => v.remainingFraction).filter((v) => v !== null);
     const remainingFraction = fracs.length ? Math.min(...fracs) : null;
     const q = classifyQuota(remainingFraction);
@@ -241,10 +323,7 @@ export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live' } =
     const repReset = resetCandidates[0] || entry.models.find((v) => v.resetTime) || entry.models[0];
     const tagged = entry.models.find((v) => v.tagTitle || v.tagDescription) || entry.models[0];
 
-    // Representative variant matching minimum fraction for pool association
-    const repModel = entry.models.find((v) => v.remainingFraction === remainingFraction) || entry.models[0];
-
-    return {
+    return attachWeeklyFields({
       id: entry.id,
       displayName: entry.displayName,
       provider: entry.provider,
@@ -261,53 +340,271 @@ export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live' } =
       tagTitle: tagged?.tagTitle || '',
       tagDescription: tagged?.tagDescription || '',
       isDefault: entry.models.some((v) => v.isDefault),
-      _poolKey: repModel ? modelToPoolKey.get(repModel.id) || '' : '',
       poolId: '',
-    };
+      _variantIds: entry.models.map((v) => v.id),
+    }, null);
   });
 
-  // Build final sorted pools and connect family -> poolId
-  const rawPools = [];
-  const usedPoolNames = new Map();
-  let poolSeq = 0;
+  const rawSummaryInput = quotaSummary !== null ? quotaSummary : (raw?.quotaSummary || null);
+  const summaryBody = rawSummaryInput?.response && typeof rawSummaryInput.response === 'object'
+    ? rawSummaryInput.response
+    : (rawSummaryInput && typeof rawSummaryInput === 'object' ? rawSummaryInput : null);
+  const rawGroups = Array.isArray(summaryBody?.groups) ? summaryBody.groups : [];
+  const quotaDescription = String(summaryBody?.description || '').trim();
 
-  for (const bucket of bucketMap.values()) {
-    poolSeq += 1;
-    const rep = bucket.models[0];
-    const baseName = derivePoolName(bucket.poolGroup, bucket.models);
-    const seenCount = (usedPoolNames.get(baseName) || 0) + 1;
-    usedPoolNames.set(baseName, seenCount);
+  const pools = [];
 
-    const providers = [...new Set(bucket.models.map((m) => m.provider))];
-    const providerLabels = [...new Set(bucket.models.map((m) => m.providerLabel))];
-    const famNames = families
-      .filter((f) => f._poolKey === bucket.key)
-      .map((f) => f.displayName);
-
-    const id = `pool-${slugify(baseName)}-${poolSeq}`;
-    const q = classifyQuota(rep.remainingFraction);
-
-    rawPools.push({
-      _key: bucket.key,
-      _baseName: baseName,
-      id,
-      name: seenCount > 1 ? `${baseName} (${seenCount})` : baseName,
-      providers,
-      providerLabels,
-      remainingFraction: rep.remainingFraction,
-      remainingPct: q.remainingPct,
-      usedPct: q.usedPct,
-      resetTime: rep.resetTime,
-      resetMs: rep.resetMs,
-      status: q.status,
-      tone: q.tone,
-      familyNames: famNames,
-      familyCount: famNames.length,
-      variantCount: bucket.models.length,
+  if (rawGroups.length > 0) {
+    const groupSpecs = rawGroups.map((g, idx) => {
+      const normalizedBuckets = (Array.isArray(g?.buckets) ? g.buckets : []).map(normalizeQuotaBucket);
+      const mentioned = parseGroupDescriptionModels(g?.description);
+      const mentionedLower = mentioned.map((s) => s.toLowerCase());
+      const inferredProviders = inferGroupProviders(g, normalizedBuckets);
+      return {
+        idx,
+        displayName: String(g?.displayName || `Quota Pool ${idx + 1}`),
+        buckets: normalizedBuckets,
+        mentioned,
+        mentionedLower,
+        inferredProviders,
+        families: [],
+        models: [],
+      };
     });
+
+    const modelById = new Map(models.map((m) => [m.id, m]));
+    const familyGroupMap = new Map();
+    const unmatchedModels = [];
+
+    for (const fam of families) {
+      let target = groupSpecs.find((gs) =>
+        nameMatchesGroupList(fam.displayName, gs.mentionedLower) ||
+        fam._variantIds.some((vid) => {
+          const v = modelById.get(vid);
+          return v && nameMatchesGroupList(v.label, gs.mentionedLower);
+        }),
+      );
+      if (!target) {
+        target = groupSpecs.find((gs) => gs.inferredProviders.includes(fam.provider));
+      }
+
+      if (target) {
+        target.families.push(fam);
+        familyGroupMap.set(fam, target);
+        for (const vid of fam._variantIds) {
+          const m = modelById.get(vid);
+          if (m) target.models.push(m);
+        }
+      } else {
+        for (const vid of fam._variantIds) {
+          const m = modelById.get(vid);
+          if (m) unmatchedModels.push(m);
+        }
+      }
+    }
+
+    for (const gs of groupSpecs) {
+      const bucketsCopy = gs.buckets.map((b) => ({ ...b }));
+      let fiveHour = bucketsCopy.find((b) => b.window === '5h') || null;
+      const weekly = bucketsCopy.find((b) => b.window === 'weekly') || null;
+      const others = bucketsCopy.filter((b) => b !== fiveHour && b !== weekly);
+
+      // Reconcile stale 5h bucket from RetrieveUserQuotaSummary when GetUserStatus has a rolled-over future window.
+      if (fiveHour && (!fiveHour.resetMs || fiveHour.resetMs <= nowMs) && gs.models.length > 0) {
+        const fresherModels = gs.models
+          .filter((m) => m.resetMs > nowMs && m.remainingFraction !== null)
+          .sort((a, b) => (a.remainingFraction - b.remainingFraction) || (a.resetMs - b.resetMs));
+        const fresher = fresherModels[0];
+        if (fresher) {
+          const fq = classifyQuota(fresher.remainingFraction);
+          fiveHour = {
+            ...fiveHour,
+            remainingFraction: fresher.remainingFraction,
+            remainingPct: fq.remainingPct,
+            usedPct: fq.usedPct,
+            resetTime: fresher.resetTime,
+            resetMs: fresher.resetMs,
+            status: fq.status,
+            tone: fq.tone,
+          };
+        }
+      }
+
+      const orderedBuckets = [fiveHour, weekly, ...others].filter(Boolean);
+      const constrained = mostConstrainedBucket(orderedBuckets);
+      const repReset = fiveHour || weekly || constrained;
+
+      const providers = gs.models.length
+        ? [...new Set(gs.models.map((m) => m.provider))]
+        : gs.inferredProviders;
+      const providerLabels = providers.map((p) => PROVIDER_LABEL_MAP[p] || 'Other');
+      const familyNames = gs.families.length ? gs.families.map((f) => f.displayName) : gs.mentioned;
+      const poolId = `pool-${slugify(gs.displayName)}-${gs.idx + 1}`;
+
+      const poolObj = {
+        id: poolId,
+        name: gs.displayName,
+        providers,
+        providerLabels,
+        remainingFraction: constrained ? constrained.remainingFraction : null,
+        remainingPct: constrained ? constrained.remainingPct : null,
+        usedPct: constrained ? constrained.usedPct : null,
+        resetTime: repReset?.resetTime || '',
+        resetMs: repReset?.resetMs || 0,
+        status: constrained ? constrained.status : 'unknown',
+        tone: constrained ? constrained.tone : 'muted',
+        fiveHour,
+        weekly,
+        buckets: orderedBuckets,
+        familyNames,
+        familyCount: familyNames.length,
+        variantCount: gs.models.length,
+      };
+      pools.push(poolObj);
+
+      for (const fam of gs.families) {
+        Object.assign(fam, attachWeeklyFields({ ...fam, poolId }, weekly));
+      }
+      for (const m of gs.models) {
+        Object.assign(m, attachWeeklyFields({ ...m, poolId }, weekly));
+      }
+    }
+
+    // Preserve any unmatched GetUserStatus models in fallback pools so nothing is dropped.
+    if (unmatchedModels.length > 0) {
+      const fbMap = new Map();
+      for (const m of unmatchedModels) {
+        const poolGroup = m.provider === 'gemini' ? 'gemini' : 'partner';
+        const fracKey = m.remainingFraction === null ? 'unknown' : m.remainingFraction.toFixed(3);
+        const key = `${poolGroup}::${m.resetTime || 'none'}::${fracKey}`;
+        if (!fbMap.has(key)) fbMap.set(key, { key, poolGroup, models: [] });
+        fbMap.get(key).models.push(m);
+      }
+      let seq = pools.length;
+      for (const bucket of fbMap.values()) {
+        seq += 1;
+        const rep = bucket.models[0];
+        const baseName = derivePoolName(bucket.poolGroup, bucket.models);
+        const q = classifyQuota(rep.remainingFraction);
+        const poolId = `pool-${slugify(baseName)}-${seq}`;
+        const bucket5h = {
+          id: `${poolId}-5h`,
+          window: '5h',
+          label: '5-Hour Limit',
+          displayName: 'Five Hour Limit Remaining',
+          description: '',
+          remainingFraction: rep.remainingFraction,
+          remainingPct: q.remainingPct,
+          usedPct: q.usedPct,
+          resetTime: rep.resetTime,
+          resetMs: rep.resetMs,
+          status: q.status,
+          tone: q.tone,
+        };
+        const matchedFams = families.filter((f) => !familyGroupMap.has(f) && f._variantIds.some((id) => bucket.models.some((m) => m.id === id)));
+        const famNames = matchedFams.map((f) => f.displayName);
+        pools.push({
+          id: poolId,
+          name: baseName,
+          providers: [...new Set(bucket.models.map((m) => m.provider))],
+          providerLabels: [...new Set(bucket.models.map((m) => m.providerLabel))],
+          remainingFraction: rep.remainingFraction,
+          remainingPct: q.remainingPct,
+          usedPct: q.usedPct,
+          resetTime: rep.resetTime,
+          resetMs: rep.resetMs,
+          status: q.status,
+          tone: q.tone,
+          fiveHour: bucket5h,
+          weekly: null,
+          buckets: [bucket5h],
+          familyNames: famNames,
+          familyCount: famNames.length,
+          variantCount: bucket.models.length,
+        });
+        for (const fam of matchedFams) fam.poolId = poolId;
+        for (const m of bucket.models) m.poolId = poolId;
+      }
+    }
+  } else {
+    // Fallback pool grouping when RetrieveUserQuotaSummary is not available.
+    const bucketMap = new Map();
+    const modelToPoolKey = new Map();
+    for (const m of models) {
+      const poolGroup = m.provider === 'gemini' ? 'gemini' : 'partner';
+      const fracKey = m.remainingFraction === null ? 'unknown' : m.remainingFraction.toFixed(3);
+      const key = `${poolGroup}::${m.resetTime || 'none'}::${fracKey}`;
+      if (!bucketMap.has(key)) {
+        bucketMap.set(key, { key, poolGroup, models: [] });
+      }
+      bucketMap.get(key).models.push(m);
+      modelToPoolKey.set(m.id, key);
+    }
+
+    const usedPoolNames = new Map();
+    let poolSeq = 0;
+    const keyToPoolId = new Map();
+
+    for (const bucket of bucketMap.values()) {
+      poolSeq += 1;
+      const rep = bucket.models[0];
+      const baseName = derivePoolName(bucket.poolGroup, bucket.models);
+      const seenCount = (usedPoolNames.get(baseName) || 0) + 1;
+      usedPoolNames.set(baseName, seenCount);
+
+      const providers = [...new Set(bucket.models.map((m) => m.provider))];
+      const providerLabels = [...new Set(bucket.models.map((m) => m.providerLabel))];
+      const famMatches = families.filter((f) => modelToPoolKey.get(f._variantIds[0]) === bucket.key);
+      const famNames = famMatches.map((f) => f.displayName);
+
+      const poolId = `pool-${slugify(baseName)}-${poolSeq}`;
+      keyToPoolId.set(bucket.key, poolId);
+      const q = classifyQuota(rep.remainingFraction);
+      const bucket5h = {
+        id: `${poolId}-5h`,
+        window: '5h',
+        label: '5-Hour Limit',
+        displayName: 'Five Hour Limit Remaining',
+        description: '',
+        remainingFraction: rep.remainingFraction,
+        remainingPct: q.remainingPct,
+        usedPct: q.usedPct,
+        resetTime: rep.resetTime,
+        resetMs: rep.resetMs,
+        status: q.status,
+        tone: q.tone,
+      };
+
+      pools.push({
+        id: poolId,
+        name: seenCount > 1 ? `${baseName} (${seenCount})` : baseName,
+        providers,
+        providerLabels,
+        remainingFraction: rep.remainingFraction,
+        remainingPct: q.remainingPct,
+        usedPct: q.usedPct,
+        resetTime: rep.resetTime,
+        resetMs: rep.resetMs,
+        status: q.status,
+        tone: q.tone,
+        fiveHour: bucket5h,
+        weekly: null,
+        buckets: [bucket5h],
+        familyNames: famNames,
+        familyCount: famNames.length,
+        variantCount: bucket.models.length,
+      });
+
+      for (const fam of famMatches) fam.poolId = poolId;
+      for (const m of bucket.models) m.poolId = poolId;
+    }
   }
 
-  rawPools.sort((a, b) => {
+  for (const fam of families) {
+    delete fam._variantIds;
+  }
+
+  pools.sort((a, b) => {
     const pa = a.remainingPct === null ? Number.MAX_SAFE_INTEGER : a.remainingPct;
     const pb = b.remainingPct === null ? Number.MAX_SAFE_INTEGER : b.remainingPct;
     if (pa !== pb) return pa - pb;
@@ -317,25 +614,29 @@ export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live' } =
     return a.name.localeCompare(b.name);
   });
 
-  const keyToPoolId = new Map(rawPools.map((p) => [p._key, p.id]));
-  for (const fam of families) {
-    fam.poolId = keyToPoolId.get(fam._poolKey) || '';
-    delete fam._poolKey;
-  }
-
-  const pools = rawPools.map(({ _key, _baseName, ...rest }) => rest);
-
   const knownPools = pools.filter((p) => p.remainingPct !== null);
   const lowestPool = knownPools[0] || null;
   const futureResets = pools.filter((p) => p.resetMs > nowMs).sort((a, b) => a.resetMs - b.resetMs);
   const anyResets = futureResets.length ? futureResets : pools.filter((p) => p.resetMs > 0).sort((a, b) => a.resetMs - b.resetMs);
   const nextResetPool = anyResets[0] || null;
 
+  const weeklyPools = pools.filter((p) => p.weekly && p.weekly.remainingPct !== null);
+  const sortedWeekly = [...weeklyPools].sort((a, b) => a.weekly.remainingPct - b.weekly.remainingPct);
+  const lowestWeeklyPool = sortedWeekly[0] || null;
+  const futureWeeklyResets = pools
+    .filter((p) => p.weekly && p.weekly.resetMs > nowMs)
+    .sort((a, b) => a.weekly.resetMs - b.weekly.resetMs);
+  const anyWeeklyResets = futureWeeklyResets.length
+    ? futureWeeklyResets
+    : pools.filter((p) => p.weekly && p.weekly.resetMs > 0).sort((a, b) => a.weekly.resetMs - b.weekly.resetMs);
+  const nextWeeklyPool = anyWeeklyResets[0] || null;
+
   return {
     ok: true,
     available: true,
     mode,
     fetchedAt: new Date(nowMs).toISOString(),
+    quotaDescription,
     plan,
     credits,
     planCredits,
@@ -350,6 +651,12 @@ export function normalizeUserStatus(raw, { nowMs = Date.now(), mode = 'live' } =
       lowestPoolName: lowestPool ? lowestPool.name : '',
       nextResetTime: nextResetPool ? nextResetPool.resetTime : '',
       nextResetMs: nextResetPool ? nextResetPool.resetMs : 0,
+      hasWeeklyData: pools.some((p) => Boolean(p.weekly)),
+      lowestWeeklyRemainingPct: lowestWeeklyPool ? lowestWeeklyPool.weekly.remainingPct : null,
+      lowestWeeklyUsedPct: lowestWeeklyPool ? lowestWeeklyPool.weekly.usedPct : null,
+      lowestWeeklyPoolName: lowestWeeklyPool ? lowestWeeklyPool.name : '',
+      nextWeeklyResetTime: nextWeeklyPool ? nextWeeklyPool.weekly.resetTime : '',
+      nextWeeklyResetMs: nextWeeklyPool ? nextWeeklyPool.weekly.resetMs : 0,
       lowPoolCount: pools.filter((p) => p.status === 'low' || p.status === 'critical' || p.status === 'exhausted').length,
       exhaustedPoolCount: pools.filter((p) => p.status === 'exhausted').length,
     },
@@ -610,7 +917,75 @@ export function getDemoUsageSnapshot({ nowMs = Date.now() } = {}) {
     },
   };
 
-  return normalizeUserStatus(demoRaw, { nowMs, mode: 'demo' });
+  const demoQuotaSummary = {
+    response: {
+      groups: [
+        {
+          displayName: 'Claude Pool',
+          description: 'Models within this group: Claude Opus 5.5, Claude Sonnet 5.5',
+          buckets: [
+            {
+              bucketId: 'claude-5h',
+              displayName: 'Five Hour Limit Remaining',
+              window: '5h',
+              remainingFraction: 0.28,
+              resetTime: claudeReset,
+            },
+            {
+              bucketId: 'claude-weekly',
+              displayName: 'Weekly Limit Remaining',
+              window: 'weekly',
+              remainingFraction: 0.42,
+              resetTime: new Date(nowMs + ((2 * 24 + 14) * 60) * 60 * 1000).toISOString(),
+            },
+          ],
+        },
+        {
+          displayName: 'Gemini Pool',
+          description: 'Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Orchestrator (Neon), Orchestrator (Carbon), Orchestrator (Argon), Gemini 3.8 Flash',
+          buckets: [
+            {
+              bucketId: 'gemini-5h',
+              displayName: 'Five Hour Limit Remaining',
+              window: '5h',
+              remainingFraction: 0.64,
+              resetTime: geminiReset,
+            },
+            {
+              bucketId: 'gemini-weekly',
+              displayName: 'Weekly Limit Remaining',
+              window: 'weekly',
+              remainingFraction: 0.78,
+              resetTime: new Date(nowMs + ((4 * 24 + 6) * 60) * 60 * 1000).toISOString(),
+            },
+          ],
+        },
+        {
+          displayName: 'GPT Pool',
+          description: 'Models within this group: GPT-OSS 120B (Medium)',
+          buckets: [
+            {
+              bucketId: 'gpt-5h',
+              displayName: 'Five Hour Limit Remaining',
+              window: '5h',
+              remainingFraction: 1,
+              resetTime: gptReset,
+            },
+            {
+              bucketId: 'gpt-weekly',
+              displayName: 'Weekly Limit Remaining',
+              window: 'weekly',
+              remainingFraction: 0.95,
+              resetTime: new Date(nowMs + ((6 * 24 + 1) * 60) * 60 * 1000).toISOString(),
+            },
+          ],
+        },
+      ],
+      description: 'Within each group, models share a weekly limit tied to your plan tier and a 5-hour rolling sprint limit.',
+    },
+  };
+
+  return normalizeUserStatus(demoRaw, { nowMs, mode: 'demo', quotaSummary: demoQuotaSummary });
 }
 
 function unavailableUsage({ code, error, nowMs = Date.now() }) {
@@ -621,6 +996,7 @@ function unavailableUsage({ code, error, nowMs = Date.now() }) {
     code,
     error,
     fetchedAt: new Date(nowMs).toISOString(),
+    quotaDescription: '',
     plan: null,
     credits: [],
     planCredits: null,
@@ -635,14 +1011,39 @@ function unavailableUsage({ code, error, nowMs = Date.now() }) {
       lowestPoolName: '',
       nextResetTime: '',
       nextResetMs: 0,
+      hasWeeklyData: false,
+      lowestWeeklyRemainingPct: null,
+      lowestWeeklyUsedPct: null,
+      lowestWeeklyPoolName: '',
+      nextWeeklyResetTime: '',
+      nextWeeklyResetMs: 0,
       lowPoolCount: 0,
       exhaustedPoolCount: 0,
     },
   };
 }
 
+async function postLsRpc(lsAddress, csrfToken, methodName) {
+  const res = await fetch(
+    `http://${lsAddress}/exa.language_server_pb.LanguageServerService/${methodName}`,
+    {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-codeium-csrf-token': csrfToken,
+      },
+      body: '{}',
+      signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+    },
+  );
+  if (!res.ok) {
+    throw new Error(`Language server ${methodName} returned HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 /**
- * Fetches live usage & quota pools from the Antigravity Language Server, or returns demo data.
+ * Fetches live usage & quota pools (both 5h and weekly) from the Antigravity Language Server, or returns demo data.
  */
 export async function getUsageSnapshot(options = {}) {
   const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : Date.now();
@@ -677,29 +1078,38 @@ export async function getUsageSnapshot(options = {}) {
 
   const runFetch = async () => {
     try {
-      let data;
+      let rawUserStatus = null;
+      let rawQuotaSummary = null;
       if (fetcher) {
-        data = await fetcher({ lsAddress, csrfToken });
-      } else {
-        const res = await fetch(
-          `http://${lsAddress}/exa.language_server_pb.LanguageServerService/GetUserStatus`,
-          {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'x-codeium-csrf-token': csrfToken,
-            },
-            body: '{}',
-            signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
-          },
-        );
-        if (!res.ok) {
-          throw new Error(`Language server returned HTTP ${res.status}`);
+        const res = await fetcher({ lsAddress, csrfToken });
+        if (res && typeof res === 'object' && ('userStatus' in res || 'quotaSummary' in res)) {
+          rawUserStatus = res;
+          rawQuotaSummary = res.quotaSummary || null;
+        } else {
+          rawUserStatus = res;
         }
-        data = await res.json();
+      } else {
+        const [statusSettled, summarySettled] = await Promise.allSettled([
+          postLsRpc(lsAddress, csrfToken, 'GetUserStatus'),
+          postLsRpc(lsAddress, csrfToken, 'RetrieveUserQuotaSummary'),
+        ]);
+        if (statusSettled.status === 'fulfilled') {
+          rawUserStatus = statusSettled.value;
+        }
+        if (summarySettled.status === 'fulfilled') {
+          rawQuotaSummary = summarySettled.value;
+        }
+        if (!rawUserStatus && !rawQuotaSummary) {
+          const reason = statusSettled.status === 'rejected' ? statusSettled.reason : summarySettled.reason;
+          throw reason instanceof Error ? reason : new Error(String(reason || 'Unable to query Antigravity language server'));
+        }
       }
 
-      const snap = normalizeUserStatus(data, { nowMs: Date.now(), mode: 'live' });
+      const snap = normalizeUserStatus(rawUserStatus || {}, {
+        nowMs: Date.now(),
+        mode: 'live',
+        quotaSummary: rawQuotaSummary,
+      });
       if (useCache) cachedLive = { at: Date.now(), snapshot: snap };
       return snap;
     } catch (err) {

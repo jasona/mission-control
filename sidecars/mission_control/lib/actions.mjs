@@ -142,6 +142,92 @@ export async function newConversation({ projectId = '', title = '', prompt = '',
 }
 
 /**
+ * Extracts normalized title, projectId, workspaceUris, and subagent flags from agentapi metadata.
+ */
+export function parseConversationMetadata(md) {
+  if (!md || typeof md !== 'object') return null;
+
+  const convMeta =
+    md?.response?.conversationMetadata ||
+    md?.response?.conversation_metadata ||
+    md?.conversationMetadata ||
+    md?.conversation_metadata ||
+    null;
+  const meta =
+    (convMeta?.metadata && typeof convMeta.metadata === 'object' ? convMeta.metadata : null) ||
+    (md?.metadata && typeof md.metadata === 'object' ? md.metadata : null) ||
+    {};
+
+  const title = String(
+    md?.title ||
+    md?.summary ||
+    md?.name ||
+    convMeta?.title ||
+    meta?.title ||
+    md?.conversation?.title ||
+    '',
+  ).trim();
+
+  const rawUris = [];
+  const pushUri = (u) => {
+    if (typeof u === 'string' && u.trim()) rawUris.push(u.trim());
+  };
+  for (const arr of [md?.workspaceUris, md?.workspace_uris, meta?.workspaceUris, meta?.workspace_uris]) {
+    if (Array.isArray(arr)) arr.forEach(pushUri);
+  }
+  if (Array.isArray(meta?.workspaces)) {
+    for (const w of meta.workspaces) {
+      if (!w || typeof w !== 'object') continue;
+      pushUri(w.workspaceFolderAbsoluteUri);
+      pushUri(w.workspace_folder_absolute_uri);
+      pushUri(w.gitRootAbsoluteUri);
+      pushUri(w.git_root_absolute_uri);
+    }
+  }
+  const workspaceUris = [...new Set(rawUris)];
+
+  const projectId = String(
+    meta?.projectId ||
+    meta?.project_id ||
+    md?.projectId ||
+    md?.project_id ||
+    '',
+  ).trim();
+
+  const parentConversationId = String(
+    meta?.parentConversationId ||
+    meta?.parent_conversation_id ||
+    md?.parentConversationId ||
+    md?.parent_conversation_id ||
+    '',
+  ).trim();
+
+  const rootConversationId = String(
+    meta?.rootConversationId ||
+    meta?.root_conversation_id ||
+    '',
+  ).trim();
+
+  const nestingDepth = Number(meta?.nestingDepth ?? meta?.nesting_depth ?? 0);
+  const isSubagent = Boolean(
+    parentConversationId ||
+    meta?.subagentSpec ||
+    meta?.subagent_spec ||
+    (Number.isFinite(nestingDepth) && nestingDepth > 0),
+  );
+
+  return {
+    title,
+    workspaceUris,
+    projectId,
+    parentConversationId,
+    rootConversationId,
+    isSubagent,
+    raw: md,
+  };
+}
+
+/**
  * Fetches cached conversation metadata from agentapi, backing off when LS is down.
  */
 export async function getConversationMetadata(threadId) {
@@ -154,13 +240,7 @@ export async function getConversationMetadata(threadId) {
   const p = (async () => {
     try {
       const md = await runAgentApi(['get-conversation-metadata', threadId], { timeout: METADATA_TIMEOUT_MS });
-      const title = String(md?.title || md?.summary || md?.name || md?.metadata?.title || md?.conversation?.title || '').trim();
-      const workspaceUris = []
-        .concat(Array.isArray(md?.workspaceUris) ? md.workspaceUris : [])
-        .concat(Array.isArray(md?.workspace_uris) ? md.workspace_uris : [])
-        .concat(Array.isArray(md?.metadata?.workspaceUris) ? md.metadata.workspaceUris : []);
-      const projectId = String(md?.projectId || md?.project_id || md?.metadata?.projectId || '').trim();
-      const data = { title, workspaceUris, projectId, raw: md };
+      const data = parseConversationMetadata(md);
       metadataCache.set(threadId, { at: Date.now(), data });
       return data;
     } catch {
